@@ -1,4 +1,4 @@
-# streamlit_app.py —— 上傳/連結讀題庫 + 三模式 + 回合制
+# streamlit_app.py —— 上傳/連結讀題庫 + 三模式 + 回合制（CSV errors 修正）
 import io
 import re
 import requests
@@ -65,16 +65,27 @@ def download_bytes_by_url(export_url: str) -> bytes:
     return r.content
 
 def load_table_from_bytes(raw: bytes) -> pd.DataFrame:
+    """
+    先嘗試以 Excel 讀；若失敗再嘗試 CSV（UTF-8 / Big5 / Latin-1，忽略壞字元）。
+    """
+    # Excel
     try:
         return pd.read_excel(io.BytesIO(raw))
     except Exception:
         pass
+    # CSV UTF-8
     try:
-        return pd.read_csv(io.BytesIO(raw))
+        return pd.read_csv(io.BytesIO(raw), encoding="utf-8", encoding_errors="ignore")
     except Exception:
         pass
+    # CSV Big5
     try:
-        return pd.read_csv(io.BytesIO(raw), encoding="big5", errors="ignore")
+        return pd.read_csv(io.BytesIO(raw), encoding="big5", encoding_errors="ignore")
+    except Exception:
+        pass
+    # CSV Latin-1（最後一層）
+    try:
+        return pd.read_csv(io.BytesIO(raw), encoding="latin-1", encoding_errors="ignore")
     except Exception as e:
         raise e
 
@@ -91,11 +102,20 @@ def read_question_bank(uploaded_file, url_input):
         name = uploaded_file.name.lower()
         try:
             if name.endswith(".csv"):
+                # 預設 → UTF-8 → Big5 → Latin-1（均忽略壞字元）
                 try:
                     return pd.read_csv(uploaded_file)
                 except Exception:
                     uploaded_file.seek(0)
-                    return pd.read_csv(uploaded_file, encoding="big5", errors="ignore")
+                    try:
+                        return pd.read_csv(uploaded_file, encoding="utf-8", encoding_errors="ignore")
+                    except Exception:
+                        uploaded_file.seek(0)
+                        try:
+                            return pd.read_csv(uploaded_file, encoding="big5", encoding_errors="ignore")
+                        except Exception:
+                            uploaded_file.seek(0)
+                            return pd.read_csv(uploaded_file, encoding="latin-1", encoding_errors="ignore")
             else:
                 return pd.read_excel(uploaded_file)
         except Exception as e:
