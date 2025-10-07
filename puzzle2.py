@@ -31,9 +31,9 @@ label, .stText, .stMarkdown, .stCaption { line-height: 1.5; }
 # ===================== 常數 =====================
 MAX_ROUNDS = 3
 QUESTIONS_PER_ROUND = 10
-MODE_1 = "模式一｜手寫輸入（含中譯）"        # 題幹：Cloze；下方顯示中文；作答：輸入英文（比對 Answer）
-MODE_2 = "模式二｜英文題目（中文選項）"      # 題幹：Cloze；選項：Meaning(Chinese)；比對 Answer
-MODE_3 = "模式三｜中文題目（英文選項）"      # 題幹：Sentence Translation (Chinese)；選項：Answer
+MODE_1 = "模式一｜手寫輸入"        # 題幹：Cloze；下方顯示中文；作答：輸入英文（比對 Answer）
+MODE_2 = "模式二｜英文題目"      # 題幹：Cloze；選項：Meaning(Chinese)；比對 Answer
+MODE_3 = "模式三｜中文題目"      # 題幹：Sentence Translation (Chinese)；選項：Answer
 
 # ===================== 解析 & 下載（支援 Drive / Sheets） =====================
 def parse_gdoc_or_drive(url: str):
