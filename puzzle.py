@@ -1,10 +1,10 @@
-# streamlit_app.py —— 內建題庫 + 模式2/3選項配對顯示（Bugfix 版）
+# streamlit_app.py —— 3 modes + 修正判分 + 回上一頁 + Summary + 突擊模式(Q11~Q30)
 import streamlit as st
 import random
 
 st.set_page_config(page_title="Cloze Test Practice (3 modes, rounds)", page_icon="📝", layout="centered")
 
-# ===================== 內建題庫（由 Excel 轉為常數） =====================
+# ===================== 內建題庫 =====================
 QUESTION_BANK = [
     {'answer_en': 'adjust', 'cloze_en': 'He tried to a_____t his chair to be more comfortable.', 'sent_zh': '他試著調整椅子讓自己更舒服。', 'meaning_zh': '調整'},
     {'answer_en': 'adjustment', 'cloze_en': 'The teacher made an a_____t to the lesson plan.', 'sent_zh': '老師對課程計畫做了調整。', 'meaning_zh': '調整'},
@@ -78,114 +78,133 @@ QUESTION_BANK = [
     {'answer_en': 'warmth', 'cloze_en': 'Kind words create w_____h in people’s hearts.', 'sent_zh': '善意的話語帶來溫暖。', 'meaning_zh': '溫暖'},
 ]
 
-# ===================== 樣式 & 常數 =====================
-st.markdown("""
-<style>
-html, body, [class*="css"]  { font-size: 22px !important; }
-h2 { font-size: 26px !important; margin-top: 0.22em !important; margin-bottom: 0.22em !important; }
-.block-container { padding-top: 0.4rem !important; padding-bottom: 0.9rem !important; max-width: 1000px; }
-.progress-card { margin-bottom: 0.22rem !important; }
-.stRadio { margin-top: 0 !important; }
-div[data-testid="stVerticalBlock"] > div:has(> div[data-testid="stRadio"]) { margin-top: 0 !important; }
-.stButton>button{ height: 44px; padding: 0 18px; }
-.feedback-small { font-size: 17px !important; line-height: 1.4; margin: 6px 0 2px 0; }
-.feedback-correct { color: #1a7f37; font-weight: 700; }
-.feedback-wrong { color: #c62828; font-weight: 700; }
-.zh-blue { color: #1e88e5; }
-</style>
-""", unsafe_allow_html=True)
+# ===================== 樣式 =====================
+def base_css():
+    st.markdown("""
+    <style>
+    html, body, [class*="css"]  { font-size: 22px !important; }
+    h2 { font-size: 26px !important; margin-top: 0.22em !important; margin-bottom: 0.22em !important; }
+    .block-container { padding-top: 0.4rem !important; padding-bottom: 0.9rem !important; max-width: 1000px; }
+    .progress-card { margin-bottom: 0.22rem !important; }
+    .stRadio { margin-top: 0 !important; }
+    div[data-testid="stVerticalBlock"] > div:has(> div[data-testid="stRadio"]) { margin-top: 0 !important; }
+    .stButton>button{ height: 44px; padding: 0 18px; }
+    .feedback-small { font-size: 17px !important; line-height: 1.4; margin: 6px 0 2px 0; }
+    .feedback-correct { color: #1a7f37; font-weight: 700; }
+    .feedback-wrong { color: #c62828; font-weight: 700; }
+    .zh-blue { color: #1e88e5; }
+    </style>
+    """, unsafe_allow_html=True)
 
-MAX_ROUNDS = 3
+def hard_css():
+    st.markdown("""
+    <style>
+    body { background:#0e0f13 !important; }
+    .block-container { color:#e7e9ee !important; }
+    h2 { color:#e7e9ee !important; }
+    .progress-card { background:#151824 !important; }
+    .feedback-correct { color:#7ae582 !important; }
+    .feedback-wrong { color:#ff6b6b !important; }
+    .zh-blue { color:#8ab4ff !important; }
+    </style>
+    """, unsafe_allow_html=True)
+
+base_css()
+
+# ===================== 常數 =====================
 QUESTIONS_PER_ROUND = 10
-
 MODE_1 = "模式一\n-   【手寫輸入】"
 MODE_2 = "模式二\n-   【中文選擇】"
 MODE_3 = "模式三\n-   【英文選擇】"
 
-# ===================== 工具：字形比對（新增） =====================
+# ===================== 判分工具：詞形彈性 =====================
 def _norm(s: str) -> str:
     return (s or "").strip().lower()
 
 def _variants(correct: str):
     c = _norm(correct)
-    vs = {c}
-    # 複數/三單
-    vs.add(c + "s")
-    vs.add(c + "es")
+    vs = {c, c+"s", c+"es"}
     if c.endswith("y"):
-        vs.add(c[:-1] + "ies")
+        vs.add(c[:-1]+"ies")
     # 過去式
-    vs.add(c + "ed")
+    vs.add(c+"ed")
     if c.endswith("y"):
-        vs.add(c[:-1] + "ied")
+        vs.add(c[:-1]+"ied")
     # 動名詞
     if c.endswith("e") and not c.endswith("ee"):
-        vs.add(c[:-1] + "ing")
+        vs.add(c[:-1]+"ing")
     else:
-        vs.add(c + "ing")
+        vs.add(c+"ing")
     if c.endswith("y"):
-        vs.add(c[:-1] + "ying")
+        vs.add(c[:-1]+"ying")
     return vs
 
 def is_free_text_correct(user_ans: str, correct_en: str) -> bool:
     u = _norm(user_ans)
     if not u:
         return False
-    if u == _norm(correct_en):
+    c = _norm(correct_en)
+    if u == c or u in _variants(c):
         return True
-    if u in _variants(correct_en):
+    if u.endswith("s") and u[:-1] == c:
         return True
-    # 也接受「去尾 s」與「去尾 es」的回推（例如 victims → victim）
-    if u.endswith("s") and u[:-1] == _norm(correct_en):
+    if u.endswith("es") and (u[:-2] == c or c+"e" == u[:-1]):
         return True
-    if u.endswith("es") and (u[:-2] == _norm(correct_en) or _norm(correct_en) + "e" == u[:-1]):
-        return True
-    if u.endswith("ies") and _norm(correct_en).endswith("y") and u[:-3] + "y" == _norm(correct_en):
+    if u.endswith("ies") and c.endswith("y") and u[:-3]+"y" == c:
         return True
     return False
 
 # ===================== 狀態 =====================
 def init_state():
     st.session_state.mode = MODE_1
-    st.session_state.round = 1
-    st.session_state.used_answers = set()
-    st.session_state.cur_round_qidx = []
-    st.session_state.cur_idx_in_round = 0
-    st.session_state.records = []  # (round, prompt, chosen, correct, is_correct, opts_disp, opts_val)
-    st.session_state.score_this_round = 0
+    st.session_state.round_active = True
+    st.session_state.used_answers = set()         # 已答對後加入，避重
+    st.session_state.cur_round_qidx = []          # 本回合 10 題的索引
+    st.session_state.cur_ptr = 0                  # 目前題目的指標（0~9）
+    st.session_state.browse_idx = None            # 瀏覽上一題用（不影響 cur_ptr）
+    st.session_state.records = []                 # (idx_label, prompt, chosen, correct_en, is_correct, mode)
     st.session_state.submitted = False
     st.session_state.last_feedback = ""
     st.session_state.options_cache = {}
     st.session_state.text_input_cache = ""
+    # 總結 & 突擊模式
+    st.session_state.summary_records = None
+    st.session_state.hard_mode = False
+    st.session_state.hard_qidx = []
+    st.session_state.hard_ptr = 0
+    st.session_state.hard_failed = False
 
-def start_new_round():
-    available = [i for i, it in enumerate(QUESTION_BANK) if it["answer_en"] not in st.session_state.used_answers]
-    chosen = available if len(available) < QUESTIONS_PER_ROUND else random.sample(available, QUESTIONS_PER_ROUND)
+def start_round10():
+    # 從所有題中抽 10 題（避免重複答案）
+    all_idx = list(range(len(QUESTION_BANK)))
+    chosen = random.sample(all_idx, k=min(QUESTIONS_PER_ROUND, len(all_idx)))
     st.session_state.cur_round_qidx = chosen
-    st.session_state.cur_idx_in_round = 0
-    st.session_state.score_this_round = 0
+    st.session_state.cur_ptr = 0
+    st.session_state.browse_idx = None
     st.session_state.submitted = False
     st.session_state.last_feedback = ""
     st.session_state.options_cache = {}
     st.session_state.text_input_cache = ""
+    st.session_state.records = []
 
-if "round" not in st.session_state:
+if "round_active" not in st.session_state:
     init_state()
-    start_new_round()
+    start_round10()
 
 # ===================== 側邊欄 =====================
 with st.sidebar:
     st.markdown("### 設定")
     can_change_mode = (
-        st.session_state.cur_idx_in_round == 0 and
+        st.session_state.cur_ptr == 0 and
         not st.session_state.submitted and
-        st.session_state.round == 1 and
-        len(st.session_state.records) == 0
+        st.session_state.round_active and
+        len(st.session_state.records) == 0 and
+        not st.session_state.hard_mode
     )
     st.session_state.mode = st.radio("選擇練習模式", [MODE_1, MODE_2, MODE_3], index=0, disabled=not can_change_mode)
     if st.button("🔄 重新開始"):
         init_state()
-        start_new_round()
+        start_round10()
         st.rerun()
 
 # ===================== 選項生成 =====================
@@ -197,15 +216,19 @@ def get_options_for_q(qidx, mode):
     correct_en = item["answer_en"].strip()
     correct_zh = (item.get("meaning_zh") or "").strip()
 
-    if mode == MODE_2:  # 中文選項（直接比中文）
-        pool = list({(it.get("meaning_zh") or "").strip() for it in QUESTION_BANK if (it.get("meaning_zh") or "").strip() and (it.get("meaning_zh") or "").strip() != correct_zh})
+    if mode == MODE_2:  # 中文選項（直接用中文比對）
+        pool = list({(it.get("meaning_zh") or "").strip()
+                     for it in QUESTION_BANK
+                     if (it.get("meaning_zh") or "").strip() and (it.get("meaning_zh") or "").strip() != correct_zh})
         distractors = random.sample(pool, k=min(3, len(pool)))
         display = list(dict.fromkeys([correct_zh] + distractors))
         random.shuffle(display)
         payload = {"display": display, "value": display[:]}
 
     elif mode == MODE_3:  # 英文選項
-        pool = list({it["answer_en"].strip() for it in QUESTION_BANK if it["answer_en"].strip() and it["answer_en"].strip() != correct_en})
+        pool = list({it["answer_en"].strip()
+                     for it in QUESTION_BANK
+                     if it["answer_en"].strip() and it["answer_en"].strip() != correct_en})
         distractors = random.sample(pool, k=min(3, len(pool)))
         display = list(dict.fromkeys([correct_en] + distractors))
         random.shuffle(display)
@@ -217,17 +240,14 @@ def get_options_for_q(qidx, mode):
     st.session_state.options_cache[key] = payload
     return payload
 
-# ===================== UI 區塊 =====================
-def render_top_card():
-    r = st.session_state.round
-    i = st.session_state.cur_idx_in_round + 1
-    n = len(st.session_state.cur_round_qidx)
+# ===================== UI 元件 =====================
+def render_top_card(title_round, i, n):
     percent = int(i / n * 100) if n else 0
     st.markdown(
         f"""
         <div class="progress-card" style='background-color:#f5f5f5; padding:9px 14px; border-radius:12px;'>
             <div style='display:flex; align-items:center; justify-content:space-between; margin-bottom:4px;'>
-                <div style='font-size:18px;'>🎯 第 {r} 回合｜進度：{i} / {n}</div>
+                <div style='font-size:18px;'>🎯 {title_round}｜進度：{i} / {n}</div>
                 <div style='font-size:16px; color:#555;'>{percent}%</div>
             </div>
             <progress value='{i}' max='{n if n else 1}' style='width:100%; height:14px;'></progress>
@@ -236,143 +256,280 @@ def render_top_card():
         unsafe_allow_html=True
     )
 
-def render_question():
-    cur_pos = st.session_state.cur_idx_in_round
-    qidx = st.session_state.cur_round_qidx[cur_pos]
-    q = QUESTION_BANK[qidx]
+def render_question_by_index(global_idx, label_no):
+    """根據 global_idx 渲染題目；label_no 用於顯示 Q 編號（例如 1~10 或 11~30）"""
+    q = QUESTION_BANK[global_idx]
     mode = st.session_state.mode
 
     if mode == MODE_3:
         prompt = q.get("sent_zh", "").strip()
-        st.markdown(f"<h2>Q{cur_pos + 1}. {prompt if prompt else '（此題缺少中文題幹）'}</h2>", unsafe_allow_html=True)
+        st.markdown(f"<h2>Q{label_no}. {prompt if prompt else '（此題缺少中文題幹）'}</h2>", unsafe_allow_html=True)
     else:
-        st.markdown(f"<h2>Q{cur_pos + 1}. {q['cloze_en']}</h2>", unsafe_allow_html=True)
+        st.markdown(f"<h2>Q{label_no}. {q['cloze_en']}</h2>", unsafe_allow_html=True)
         if mode == MODE_1 and q.get("sent_zh"):
             st.markdown(f"<div class='zh-blue'>📘 {q['sent_zh']}</div>", unsafe_allow_html=True)
 
+    # 瀏覽模式下禁用作答
+    browsing = st.session_state.browse_idx is not None
+    disabled = browsing
+
     if mode == MODE_1:
-        user_text = st.text_input("請輸入英文答案：", key=f"ti_{qidx}", value=st.session_state.text_input_cache)
-        return qidx, q, user_text
+        user_text = st.text_input("請輸入英文答案：",
+                                  key=f"ti_{global_idx}_{label_no}",
+                                  value=st.session_state.text_input_cache,
+                                  disabled=disabled)
+        return q, ("TEXT", user_text)
     else:
-        payload = get_options_for_q(qidx, mode)
+        payload = get_options_for_q(global_idx, mode)
         options_disp = payload["display"]
         if not options_disp:
             st.info("No options to select.")
-            user_choice_disp = None
+            choice = None
         else:
-            user_choice_disp = st.radio("", options_disp, key=f"mc_{qidx}", label_visibility="collapsed")
-        return qidx, q, (user_choice_disp, payload)
+            choice = st.radio("", options_disp, key=f"mc_{global_idx}_{label_no}",
+                              label_visibility="collapsed", disabled=disabled)
+        return q, ("MC", (choice, payload))
 
-def handle_action(qidx, q, user_input):
-    mode = st.session_state.mode
-    correct_en = q["answer_en"].strip()
-    correct_zh = (q.get("meaning_zh") or "").strip()
-
-    if mode == MODE_1:
-        user_ans = (user_input or "").strip()
-        is_correct = is_free_text_correct(user_ans, correct_en)
-        chosen_label = user_ans
-        opts_disp, opts_val = [], []
+def record_and_feedback(idx_label, q, chosen_label, is_correct):
+    st.session_state.records.append((
+        idx_label,                                 # 題次顯示（Q1/Q11）
+        q["cloze_en"] if st.session_state.mode != MODE_3 else q.get("sent_zh", ""),
+        chosen_label,
+        q["answer_en"].strip(),
+        is_correct,
+        st.session_state.mode
+    ))
+    if is_correct:
+        st.session_state.last_feedback = "<div class='feedback-small feedback-correct'>✅ 回答正確</div>"
     else:
-        chosen_disp, payload = user_input
-        if chosen_disp is None:
-            st.warning("請先選擇一個選項。")
-            return
-        options_disp = payload["display"]
-        options_val  = payload["value"]
+        st.session_state.last_feedback = f"<div class='feedback-small feedback-wrong'>❌ Incorrect. 正確答案：{q['answer_en'].strip()}</div>"
 
-        if mode == MODE_2:
-            # 直接用中文義項比對（修正多義對不到英文的 bug）
-            is_correct = (_norm(chosen_disp) == _norm(correct_zh))
-            chosen_label = chosen_disp  # 中文
-        else:  # MODE_3
-            is_correct = (_norm(chosen_disp) == _norm(correct_en))
-            chosen_label = chosen_disp  # 英文
-        opts_disp, opts_val = options_disp, options_val
+# ===================== 主流程：一般 10 題 =====================
+def normal_mode_page():
+    cur_ptr = st.session_state.cur_ptr
+    browse_idx = st.session_state.browse_idx
+    show_idx = st.session_state.cur_round_qidx[browse_idx if browse_idx is not None else cur_ptr]
+    label_no = (browse_idx if browse_idx is not None else cur_ptr) + 1
 
-    if not st.session_state.submitted:
-        st.session_state.submitted = True
-        st.session_state.records.append((
-            st.session_state.round,
-            q["cloze_en"] if mode != MODE_3 else q.get("sent_zh", ""),
-            chosen_label,
-            correct_en,
-            is_correct,
-            opts_disp,
-            opts_val,
-        ))
-        if is_correct:
-            st.session_state.last_feedback = "<div class='feedback-small feedback-correct'>✅ 回答正確</div>"
-            st.session_state.score_this_round += 1
-        else:
-            st.session_state.last_feedback = f"<div class='feedback-small feedback-wrong'>❌ Incorrect. 正確答案：{correct_en}</div>"
-        st.rerun()
-    else:
-        st.session_state.used_answers.add(correct_en)
-        st.session_state.cur_idx_in_round += 1
-        st.session_state.submitted = False
-        st.session_state.last_feedback = ""
-        st.session_state.text_input_cache = ""
-        if st.session_state.cur_idx_in_round >= len(st.session_state.cur_round_qidx):
-            if (st.session_state.score_this_round == len(st.session_state.cur_round_qidx)) and (st.session_state.round < MAX_ROUNDS):
-                st.session_state.round += 1
-                start_new_round()
-            else:
-                st.session_state.round = None
-        st.rerun()
+    render_top_card("第 1 回合", cur_ptr + 1, len(st.session_state.cur_round_qidx))
+    q, uinput = render_question_by_index(show_idx, label_no)
 
-# ===================== 主畫面 =====================
-if st.session_state.round:
-    render_top_card()
-    qidx, q, user_input = render_question()
-
-    # 上方回饋（送出後）
-    if st.session_state.submitted and st.session_state.last_feedback:
+    # 回饋
+    if st.session_state.submitted and st.session_state.last_feedback and (browse_idx is None):
         st.markdown(st.session_state.last_feedback, unsafe_allow_html=True)
 
-    # 送出／下一題
-    action_label = "下一題" if st.session_state.submitted else "送出答案"
-    if st.button(action_label, key="action_btn"):
-        handle_action(qidx, q, user_input)
+    # 兩顆按鈕：回上一頁 / 送出or下一題
+    left, right = st.columns([1, 2])
+    with left:
+        if st.button("⬅️ 回上一題", use_container_width=True):
+            # 僅切到瀏覽模式，不影響目前 pointer；若已在第一題則不動
+            if cur_ptr > 0:
+                st.session_state.browse_idx = cur_ptr - 1
+            st.rerun()
 
-    # ===== 提交後：固定顯示「正確答案（英 + 中）」 + 選項配對 =====
-    if st.session_state.submitted and st.session_state.records:
-        last = st.session_state.records[-1]
-        # last: (round, prompt, chosen, correct_en, is_correct, opts_disp, opts_val)
-        _, _, _, correct_en, _, opts_disp, _ = last
+    with right:
+        action_label = "下一題" if st.session_state.submitted or (st.session_state.browse_idx is not None) else "送出答案"
+        if st.button(action_label, use_container_width=True, key="action_btn_normal"):
+            # 若在瀏覽狀態，回到目前題目即可
+            if st.session_state.browse_idx is not None:
+                st.session_state.browse_idx = None
+                st.rerun()
 
-        # 英→中 對照
-        en2zh = { it["answer_en"].strip(): (it.get("meaning_zh") or "").strip() for it in QUESTION_BANK }
+            mode = st.session_state.mode
+            correct_en = q["answer_en"].strip()
+            correct_zh = (q.get("meaning_zh") or "").strip()
 
+            if not st.session_state.submitted:
+                # 第一次按 -> 判分
+                if uinput[0] == "TEXT":
+                    ans = (uinput[1] or "").strip()
+                    is_correct = is_free_text_correct(ans, correct_en)
+                    record_and_feedback(label_no, q, ans, is_correct)
+                else:
+                    chosen_disp, payload = uinput[1]
+                    if chosen_disp is None:
+                        st.warning("請先選擇一個選項。")
+                        st.stop()
+                    if mode == MODE_2:
+                        is_correct = (_norm(chosen_disp) == _norm(correct_zh))
+                        record_and_feedback(label_no, q, chosen_disp, is_correct)
+                    else:  # MODE_3
+                        is_correct = (_norm(chosen_disp) == _norm(correct_en))
+                        record_and_feedback(label_no, q, chosen_disp, is_correct)
+
+                st.session_state.submitted = True
+                if st.session_state.records[-1][4]:  # 最新這題若正確
+                    st.session_state.used_answers.add(correct_en)
+                st.rerun()
+
+            else:
+                # 第二次按 -> 進入下一題/或結束
+                st.session_state.submitted = False
+                st.session_state.last_feedback = ""
+                st.session_state.text_input_cache = ""
+                st.session_state.cur_ptr += 1
+
+                if st.session_state.cur_ptr >= len(st.session_state.cur_round_qidx):
+                    # 回合結束，進 Summary
+                    st.session_state.round_active = False
+                    st.session_state.summary_records = st.session_state.records[:]
+                st.rerun()
+
+    # 題後對照（只在非瀏覽 & 已提交）
+    if (st.session_state.browse_idx is None) and st.session_state.submitted and len(st.session_state.records) > 0:
+        en2zh = {it["answer_en"].strip(): (it.get("meaning_zh") or "").strip() for it in QUESTION_BANK}
+        correct_en = q["answer_en"].strip()
         correct_zh = en2zh.get(correct_en, "")
         st.markdown("---")
         st.markdown(f"**正確答案：{correct_en}**　({correct_zh})")
 
-        # 模式2：只列出中文選項清單（避免錯誤中→英對映）
-        if st.session_state.mode == MODE_2 and opts_disp:
-            st.markdown("**本題所有選項：**  ")
-            st.markdown("、".join([str(zh).strip() for zh in opts_disp if str(zh).strip()]))
+# ===================== Summary（10 題後） =====================
+def summary_page():
+    recs = st.session_state.summary_records or []
+    total = len(recs)
+    correct = sum(1 for r in recs if r[4])
+    acc = (correct / total * 100) if total else 0.0
 
-        # 模式3：列出「英文：中文」
-        if st.session_state.mode == MODE_3 and opts_disp:
-            pairs = []
-            for en in opts_disp:
-                en_s = str(en).strip()
-                if not en_s:
-                    continue
-                zh_s = en2zh.get(en_s, "")
-                pairs.append(f"{en_s}：{zh_s if zh_s else '(無中文)'}")
-            if pairs:
-                st.markdown("**本題所有選項：**  ")
-                st.markdown("、".join(pairs))
-
-else:
-    # 結果頁
-    total_answered = len(st.session_state.records)
-    total_correct = sum(1 for rec in st.session_state.records if rec[4])
     st.subheader("📊 總結")
-    st.markdown(f"<h3>Total Answered: {total_answered}</h3>", unsafe_allow_html=True)
-    st.markdown(f"<h3>Total Correct: {total_correct}</h3>", unsafe_allow_html=True)
-    acc = (total_correct / total_answered * 100) if total_answered else 0.0
-    st.markdown(f"<h3>Accuracy: {acc:.1f}%</h3>", unsafe_allow_html=True)
-    st.button("🔄 再玩一次", on_click=lambda: (init_state(), start_new_round()))
+    st.markdown(f"**Total Answered:** {total}")
+    st.markdown(f"**Total Correct:** {correct}")
+    st.markdown(f"**Accuracy:** {acc:.1f}%")
+
+    # 錯題總覽
+    wrongs = [r for r in recs if not r[4]]
+    st.markdown("---")
+    st.markdown("### ❌ 錯題總覽")
+    if not wrongs:
+        st.info("本回合無錯題！")
+    else:
+        for idx_label, prompt, chosen, correct_en, is_correct, _ in wrongs:
+            en2zh = {it["answer_en"].strip(): (it.get("meaning_zh") or "").strip() for it in QUESTION_BANK}
+            st.markdown(f"- **Q{idx_label}**：{prompt}")
+            st.markdown(f"　你的答案：`{chosen}`")
+            st.markdown(f"　正確答案：`{correct_en}`（{en2zh.get(correct_en, '')}）")
+
+    st.markdown("---")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🔁 再玩一次", use_container_width=True):
+            init_state()
+            start_round10()
+            st.rerun()
+    with c2:
+        # 全對才出現
+        if correct == total and total == QUESTIONS_PER_ROUND:
+            if st.button("⚡ 你渴望力量嗎", use_container_width=True):
+                # 進入突擊模式：抽 20 題，不含前 10 題的答案
+                used = set([QUESTION_BANK[i]["answer_en"] for i in st.session_state.cur_round_qidx])
+                remain = [i for i, it in enumerate(QUESTION_BANK) if it["answer_en"] not in used]
+                pick_n = min(20, len(remain))
+                st.session_state.hard_qidx = random.sample(remain, k=pick_n)
+                st.session_state.hard_ptr = 0
+                st.session_state.hard_failed = False
+                st.session_state.hard_mode = True
+                st.session_state.browse_idx = None
+                st.session_state.submitted = False
+                st.session_state.last_feedback = ""
+                hard_css()
+                st.rerun()
+
+# ===================== 突擊模式（Q11~Q30，答錯即結束） =====================
+def hard_mode_page():
+    hard_css()
+    total = len(st.session_state.hard_qidx)
+    # 若已失敗或已全部答完
+    if st.session_state.hard_failed or st.session_state.hard_ptr >= total:
+        st.subheader("⚡ 突擊模式結算")
+        got = st.session_state.hard_ptr if not st.session_state.hard_failed else st.session_state.hard_ptr
+        st.markdown(f"**你通過了：{got} / {total} 題**")
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("🔁 回到一般模式再來", use_container_width=True):
+                init_state()
+                start_round10()
+                st.rerun()
+        with c2:
+            if st.button("🏁 結束", use_container_width=True):
+                st.stop()
+        st.stop()
+
+    cur = st.session_state.hard_ptr
+    show_idx = st.session_state.hard_qidx[st.session_state.browse_idx if st.session_state.browse_idx is not None else cur]
+    # 顯示編號：Q11 起
+    label_no = 11 + (st.session_state.browse_idx if st.session_state.browse_idx is not None else cur)
+
+    render_top_card("⚡ 突擊模式", cur + 1, total)
+    q, uinput = render_question_by_index(show_idx, label_no)
+
+    # 回饋（只在非瀏覽 & 已提交）
+    if st.session_state.submitted and st.session_state.last_feedback and (st.session_state.browse_idx is None):
+        st.markdown(st.session_state.last_feedback, unsafe_allow_html=True)
+
+    left, right = st.columns([1, 2])
+    with left:
+        if st.button("⬅️ 回上一題", use_container_width=True, key="hard_back"):
+            if cur > 0:
+                st.session_state.browse_idx = cur - 1
+            st.rerun()
+
+    with right:
+        action_label = "下一題" if st.session_state.submitted or (st.session_state.browse_idx is not None) else "送出答案"
+        if st.button(action_label, use_container_width=True, key="action_btn_hard"):
+            if st.session_state.browse_idx is not None:
+                st.session_state.browse_idx = None
+                st.rerun()
+
+            correct_en = q["answer_en"].strip()
+            correct_zh = (q.get("meaning_zh") or "").strip()
+            mode = st.session_state.mode
+
+            if not st.session_state.submitted:
+                if uinput[0] == "TEXT":
+                    ans = (uinput[1] or "").strip()
+                    is_correct = is_free_text_correct(ans, correct_en)
+                    record_and_feedback(label_no, q, ans, is_correct)
+                else:
+                    chosen_disp, payload = uinput[1]
+                    if chosen_disp is None:
+                        st.warning("請先選擇一個選項。")
+                        st.stop()
+                    if mode == MODE_2:
+                        is_correct = (_norm(chosen_disp) == _norm(correct_zh))
+                        record_and_feedback(label_no, q, chosen_disp, is_correct)
+                    else:
+                        is_correct = (_norm(chosen_disp) == _norm(correct_en))
+                        record_and_feedback(label_no, q, chosen_disp, is_correct)
+
+                st.session_state.submitted = True
+                if st.session_state.records[-1][4]:
+                    st.session_state.used_answers.add(correct_en)
+                else:
+                    # 突擊模式錯一次就結束
+                    st.session_state.hard_failed = True
+                st.rerun()
+            else:
+                # 下一題（僅在未失敗時）
+                st.session_state.submitted = False
+                st.session_state.last_feedback = ""
+                st.session_state.text_input_cache = ""
+                if not st.session_state.hard_failed:
+                    st.session_state.hard_ptr += 1
+                st.rerun()
+
+    # 題後對照（只在非瀏覽 & 已提交）
+    if (st.session_state.browse_idx is None) and st.session_state.submitted:
+        en2zh = {it["answer_en"].strip(): (it.get("meaning_zh") or "").strip() for it in QUESTION_BANK}
+        correct_en = q["answer_en"].strip()
+        correct_zh = en2zh.get(correct_en, "")
+        st.markdown("---")
+        st.markdown(f"**正確答案：{correct_en}**　({correct_zh})")
+
+# ===================== 路由 =====================
+if st.session_state.round_active:
+    normal_mode_page()
+else:
+    # 顯示 Summary（含「你渴望力量嗎」）
+    if not st.session_state.hard_mode:
+        summary_page()
+    else:
+        hard_mode_page()
