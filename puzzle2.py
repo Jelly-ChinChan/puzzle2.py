@@ -1,455 +1,755 @@
-# streamlit_app.py —— 只保留貼連結、三模式選擇、CSV 解析修正、題目正常出現
-import io
-import re
-import requests
-import pandas as pd
-import streamlit as st
+# streamlit_app.py — 3 modes + Summary + 力量模式 + 終極力量回合 + 作答蒐集/儀表板
+# 變更摘要：
+# 1) 題庫改為 11 題「簡易理化」問題。
+# 2) 新增「作答者資訊」欄位（姓名/班級/座號）。
+# 3) 以兩種方式寫出作答紀錄：
+#    - A. 若設定 Google Sheet（建議）：自動 Append 到試算表（雲端長期保存，可分享連結）
+#    - B. 若未設定 Google Sheet：落地到本機 responses.csv，並提供內建儀表板（?view=dashboard）查看。
+# 4) 新增「儀表板」頁（?view=dashboard）可即時查看彙整資料（Google Sheet 或本機 CSV）。
+# 5) 維持原有 3 模式、Summary、力量模式與終極力量回合，但將本回合題數改為 11。
+
+import os
+import csv
+import uuid
 import random
+import datetime as dt
+from urllib.parse import urlencode
 
-st.set_page_config(page_title="Cloze Test Practice (3 modes, rounds)", page_icon="📝", layout="centered")
+import streamlit as st
 
-# ===================== 樣式 =====================
-st.markdown("""
+# ===============（可選）Google Sheet 連線設定=================
+# 若要寫入 Google 試算表：
+# 1) 建立一個 Google Cloud 專案與 Service Account，下載 JSON 憑證
+# 2) 在你的 Streamlit Cloud 專案的「Secrets」加入：
+#    [gsheets]
+#    spreadsheet_id = "你的Sheet ID"  # URL 中 /d/ 後面那段
+#    service_account_json = "{""type"":""service_account"",...}"  # 直接貼上整個 JSON 內容（用雙引號跳脫）
+# 3) 到該試算表，將共享權限加入 Service Account 的 email（可編輯）
+# 4) 需要相依套件：gspread、google-auth
+
+_GS_OK = False
+_gs_client = None
+_gs_worksheet = None
+
+try:
+    from google.oauth2.service_account import Credentials  # type: ignore
+    import gspread  # type: ignore
+    def _try_init_gsheet():
+        global _GS_OK, _gs_client, _gs_worksheet
+        conf = st.secrets.get("gsheets", {}) if hasattr(st, "secrets") else {}
+        sid = conf.get("spreadsheet_id")
+        saj = conf.get("service_account_json")
+        if not sid or not saj:
+            _GS_OK = False
+            return
+        creds = Credentials.from_service_account_info(eval(saj), scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ])
+        _gs_client = gspread.authorize(creds)
+        sh = _gs_client.open_by_key(sid)
+        try:
+            _gs_worksheet = sh.worksheet("responses")
+        except Exception:
+            _gs_worksheet = sh.add_worksheet(title="responses", rows=1000, cols=30)
+            _gs_worksheet.append_row([
+                "timestamp", "session_id", "name", "class", "seat",
+                "phase", "mode", "q_label", "q_id", "prompt",
+                "answer_en", "user_answer", "is_correct"
+            ])
+        _GS_OK = True
+    _try_init_gsheet()
+except Exception:
+    _GS_OK = False
+
+# ===================== 共用設定 =====================
+st.set_page_config(page_title="Cloze Test (3 modes) + Logging", page_icon="📝", layout="centered")
+
+# 儀表板切換（同一 URL 加上 ?view=dashboard）
+params = st.experimental_get_query_params() if hasattr(st, "experimental_get_query_params") else {}
+VIEW_DASHBOARD = (params.get("view", [""])[0].lower() == "dashboard")
+
+# ===================== 題庫（11 題簡易理化） =====================
+# 欄位定義：answer_en（標準答案，英文字或符號）、cloze_en（英語題幹/填空）、sent_zh（中文提示/題幹）、meaning_zh（中文釋義/答案說明）
+QUESTION_BANK = [
+    {"answer_en": "gravity", "cloze_en": "The force that pulls objects toward Earth is called g_____y.", "sent_zh": "把物體往地球拉的力叫做什麼？", "meaning_zh": "重力"},
+    {"answer_en": "evaporation", "cloze_en": "Water turns into vapor through e__________n.", "sent_zh": "水變成水蒸氣的過程叫？", "meaning_zh": "蒸發"},
+    {"answer_en": "freezing", "cloze_en": "Water f_______g at 0°C.", "sent_zh": "水在 0°C 會發生什麼相變？", "meaning_zh": "凝固/結冰"},
+    {"answer_en": "density", "cloze_en": "Mass divided by volume is d_____y.", "sent_zh": "質量除以體積稱為？", "meaning_zh": "密度"},
+    {"answer_en": "voltage", "cloze_en": "The electrical potential difference is called v_____e.", "sent_zh": "電位差又稱？", "meaning_zh": "電壓"},
+    {"answer_en": "current", "cloze_en": "The rate of flow of charge is c_____t.", "sent_zh": "單位時間內通過導體截面的電荷量稱為？", "meaning_zh": "電流"},
+    {"answer_en": "resistance", "cloze_en": "Opposition to current flow is r________e.", "sent_zh": "阻礙電流通過的性質稱？", "meaning_zh": "電阻"},
+    {"answer_en": "acid", "cloze_en": "A substance with pH less than 7 is an a____d.", "sent_zh": "pH 小於 7 的物質稱為？", "meaning_zh": "酸"},
+    {"answer_en": "base", "cloze_en": "A substance with pH greater than 7 is a b___e.", "sent_zh": "pH 大於 7 的物質稱為？", "meaning_zh": "鹼/鹼性物質"},
+    {"answer_en": "neutralization", "cloze_en": "Acid reacts with base to form salt and water. This is n____________n.", "sent_zh": "酸和鹼反應生成鹽與水的反應叫？", "meaning_zh": "中和"},
+    {"answer_en": "photosynthesis", "cloze_en": "Plants make food using light in p____________s.", "sent_zh": "植物利用光能製造養分的作用？", "meaning_zh": "光合作用"},
+]
+
+# 題目數：本回合 11 題
+QUESTIONS_PER_ROUND = 11
+
+# ===================== 外觀（保留前版風格重點） =====================
+BASE_CSS = """
 <style>
-html, body, [class*="css"]  { font-size: 22px !important; }
-h2 { font-size: 26px !important; margin-top: 0.22em !important; margin-bottom: 0.22em !important; }
-.block-container { padding-top: 0.4rem !important; padding-bottom: 0.9rem !important; max-width: 1000px; }
-.progress-card { margin-bottom: 0.22rem !important; }
-.stRadio { margin-top: 0 !important; }
-.stButton>button{ height: 44px; padding: 0 18px; }
-.feedback-small { font-size: 17px !important; line-height: 1.4; margin: 6px 0 2px 0; }
-.feedback-correct { color: #1a7f37; font-weight: 700; }
-.feedback-wrong { color: #c62828; font-weight: 700; }
-.zh-blue { color: #1e88e5; }
-.subtle-callout { padding: 12px 14px; border-radius: 10px; background: #fafafa; border: 1px dashed #ddd; }
-.stSidebar, .block-container { overflow: visible !important; }
-label, .stText, .stMarkdown, .stCaption { line-height: 1.5; }
-.sidebar-spacer { height: 10px; }
+  html, body, [class*="css"] { font-size: 22px !important; }
+  .block-container { padding-top: .28rem !important; padding-bottom: .6rem !important; max-width: 1000px; }
+  h2 { font-size: 26px !important; margin-top: .10rem !important; margin-bottom: .40rem !important; }
+  .progress-card-normal { margin: 0 0 .30rem 0 !important; }
+  .progress-card-normal progress { width:100%; height:8px; -webkit-appearance:none; appearance:none; }
+  .progress-card-normal progress::-webkit-progress-bar { background:#e9e9ee; border-radius:6px; }
+  .progress-card-normal progress::-webkit-progress-value { background:#5a67d8; border-radius:6px; box-shadow:none; }
+  .stRadio [role="radiogroup"] > label:hover { filter: drop-shadow(0 0 4px rgba(90,103,216,.25)); }
+  .stRadio input[type="radio"]:checked { accent-color: #5a67d8; }
+  @media (max-width: 480px){ .block-container { padding-top: .26rem !important; } h2 { margin-top: .06rem !important; margin-bottom: .34rem !important; } }
 </style>
-""", unsafe_allow_html=True)
+"""
 
-# ===================== 常數 =====================
-MAX_ROUNDS = 3
-QUESTIONS_PER_ROUND = 10
-MODE_1 = "模式一｜手寫輸入"        # 題幹：Cloze；下方顯示中文；作答：輸入英文（比對 Answer）
-MODE_2 = "模式二｜英文題目"      # 題幹：Cloze；選項：Meaning(Chinese)；比對 Answer
-MODE_3 = "模式三｜中文題目"      # 題幹：Sentence Translation (Chinese)；選項：Answer
+NEON_BLACK_CSS = """
+<style>
+  :root { --bg:#000; --txt:#ffffff; --pink:#ff3d81; }
+  html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"], [data-testid="stSidebar"] { background-color:#000 !important; color:var(--txt) !important; }
+  section.main, .block-container { background:transparent !important; color:var(--txt) !important; padding-top: 1.45rem !important; }
+  .progress-card-power { margin: .10rem 0 .10rem 0 !important; }
+  .progress-card-power progress { width:100%; height:14px; -webkit-appearance:none; appearance:none; }
+  .progress-card-power progress::-webkit-progress-bar { background:#0f0f0f; border-radius:10px; }
+  .progress-card-power progress::-webkit-progress-value { background: linear-gradient(90deg, #ff3468, #ff7a90); border-radius:10px; box-shadow:0 0 14px rgba(255,52,104,.85), 0 0 30px rgba(255,52,104,.45); }
+  h2 { color:#fff !important; margin-top:.06rem !important; margin-bottom:.28rem !important; }
+  .stButton>button{ background:#060606; color:#fff; border:1px solid rgba(255,255,255,.15); border-radius:12px; }
+  .stButton>button:hover{ box-shadow:0 0 12px rgba(255,61,129,.45), inset 0 0 6px rgba(255,255,255,.15); }
+  .stRadio [role="radiogroup"] > label{ color:#fff !important; border-radius:12px; padding:6px 8px; transition: filter .12s ease, box-shadow .12s ease; }
+  .stRadio [role="radiogroup"] label, .stRadio [role="radiogroup"] label * { color:#fff !important; opacity:1 !important; }
+  .stRadio [role="radiogroup"] > label:hover{ filter: drop-shadow(0 0 10px rgba(255,61,129,.6)); box-shadow: 0 0 8px rgba(255,61,129,.35) inset, 0 0 8px rgba(255,61,129,.35); }
+  .stRadio [role="radiogroup"] > label:has(input[type="radio"]:checked){ filter: drop-shadow(0 0 12px rgba(255,61,129,.85)); box-shadow: 0 0 10px rgba(255,61,129,.45) inset, 0 0 10px rgba(255,61,129,.45); }
+  .stRadio input[type="radio"]:checked { accent-color:#ff3d81; }
+  .explain { background:#0b0b0b; border:1px solid rgba(255,255,255,.12); border-radius:12px; padding:10px 14px; }
+  .badge { display:inline-block; padding:2px 10px; border-radius:999px; font-weight:700; font-size:16px; margin-right:6px; }
+  .ok{ background:#103a22; color:#7ae582; border:1px solid #255f3d; }
+  .bad{ background:#2a0b0b; color:#ff6b6b; border:1px solid #7a2d2d; }
+  .gameover { font-size:48px; font-weight:900; letter-spacing:.12em; color:#ff3d81; text-align:center; margin:18px 0 8px; text-shadow:0 0 10px rgba(255,61,129,.85), 0 0 22px rgba(255,255,255,.25); }
+  .devil { font-size:64px; text-align:center; filter: drop-shadow(0 0 14px rgba(255,61,129,.75)); }
+  @media (max-width: 480px){ .block-container { padding-top: 1.42rem !important; } .progress-card-power { margin: .10rem 0 .10rem 0 !important; } h2 { margin-top:.04rem !important; margin-bottom:.26rem !important; } }
+</style>
+"""
 
-# ===================== 解析 & 下載（支援 Drive / Sheets） =====================
-def parse_gdoc_or_drive(url: str):
-    url = url.strip()
-    # Sheets
-    m = re.search(r"docs\.google\.com\/spreadsheets\/d\/([a-zA-Z0-9-_]+)", url)
-    if m:
-        fid = m.group(1)
-        return {"export_url": f"https://docs.google.com/spreadsheets/d/{fid}/export?format=xlsx"}
-    # Drive (多種格式)
-    patterns = [
-        r"drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]+)",
-        r"drive\.google\.com\/open\?id=([a-zA-Z0-9_-]+)",
-        r"drive\.google\.com\/uc\?id=([a-zA-Z0-9_-]+)",
-        r"drive\.google\.com\/.*?[?&]id=([a-zA-Z0-9_-]+)",
-    ]
-    for p in patterns:
-        m = re.search(p, url)
-        if m:
-            fid = m.group(1)
-            return {"export_url": f"https://drive.google.com/uc?export=download&id={fid}"}
-    return None
+st.markdown(BASE_CSS, unsafe_allow_html=True)
 
-def download_bytes_by_url(export_url: str) -> bytes:
-    r = requests.get(export_url, timeout=45)
-    r.raise_for_status()
-    return r.content
+# ===================== 模式名稱 =====================
+MODE_1 = "模式一\n-   【手寫輸入】"
+MODE_2 = "模式二\n-   【中文選擇】"
+MODE_3 = "模式三\n-   【英文選擇】"
 
-def load_table_from_bytes(raw: bytes) -> pd.DataFrame:
-    """
-    先嘗試以 Excel 讀；若失敗再嘗試 CSV（UTF-8 / Big5 / Latin-1；忽略壞字元）
-    """
-    try:
-        return pd.read_excel(io.BytesIO(raw))
-    except Exception:
-        pass
-    try:
-        return pd.read_csv(io.BytesIO(raw), encoding="utf-8", encoding_errors="ignore")
-    except Exception:
-        pass
-    try:
-        return pd.read_csv(io.BytesIO(raw), encoding="big5", encoding_errors="ignore")
-    except Exception:
-        pass
-    return pd.read_csv(io.BytesIO(raw), encoding="latin-1", encoding_errors="ignore")
+# ===================== 判分（彈性） =====================
 
-def read_question_bank(url_input):
-    """
-    只支援連結：成功回傳 DataFrame，否則 None
-    """
-    if not url_input.strip():
-        st.warning("請貼上 Google Drive / Google Sheets 連結")
-        return None
-    parsed = parse_gdoc_or_drive(url_input)
-    if not parsed:
-        st.error("這不是可辨識的 Drive/Sheets 連結，請確認分享連結格式。")
-        return None
-    try:
-        raw = download_bytes_by_url(parsed["export_url"])
-        return load_table_from_bytes(raw)
-    except requests.exceptions.RequestException:
-        st.error("下載連結時發生網路錯誤。請確認公開權限或稍候再試，或換 Safari / Firefox。")
-    except Exception as e:
-        st.error(f"解析連結內容失敗：{e}")
-    return None
+def _norm(s: str) -> str:
+    return (s or "").strip().lower()
 
-# ===================== 欄位推斷 & 題庫建置 =====================
-def infer_columns(df: pd.DataFrame):
-    def norm_map(cols):
-        return {c.strip().lower(): c for c in cols}
-    n = norm_map(df.columns)
 
-    def get(*cands):
-        for c in cands:
-            key = c.strip().lower()
-            if key in n:
-                return n[key]
-        return None
+def _variants(correct: str):
+    c = _norm(correct)
+    vs = {c, c + "s", c + "es"}
+    if c.endswith("y"):
+        vs.add(c[:-1] + "ies")
+    vs.add(c + "ed")
+    if c.endswith("y"):
+        vs.add(c[:-1] + "ied")
+    if c.endswith("e") and not c.endswith("ee"):
+        vs.add(c[:-1] + "ing")
+    else:
+        vs.add(c + "ing")
+    if c.endswith("y"):
+        vs.add(c[:-1] + "ying")
+    return vs
 
-    cloze_en = get("cloze sentence", "cloze_sentence", "cloze", "english_sentence", "sentence_en", "english")
-    sent_zh  = get("sentence translation (chinese)", "sentence_translation_(chinese)",
-                   "sentence translation ( chinese )", "sentence_translation", "sentence_zh",
-                   "chinese_sentence", "zh_sentence", "translation_chinese")
-    answer_en = get("answer", "word", "term", "english_word")
-    meaning_zh = get("meaning (chinese)", "meaning", "chinese meaning", "meaning_zh", "definition_zh", "chinese")
 
-    return answer_en, cloze_en, sent_zh, meaning_zh
+def is_free_text_correct(user_ans: str, correct_en: str) -> bool:
+    u = _norm(user_ans)
+    c = _norm(correct_en)
+    if not u:
+        return False
+    if u == c or u in _variants(c):
+        return True
+    if u.endswith("s") and u[:-1] == c:
+        return True
+    if u.endswith("es") and (u[:-2] == c or c + "e" == u[:-1]):
+        return True
+    if u.endswith("ies") and c.endswith("y") and u[:-3] + "y" == c:
+        return True
+    return False
 
-def build_question_bank_from_df(df: pd.DataFrame, mapping=None):
-    a_ans, a_en, a_zh, a_mean = infer_columns(df)
-    if mapping:
-        a_ans  = mapping.get("answer_en") or a_ans
-        a_en   = mapping.get("cloze_en") or a_en
-        a_zh   = mapping.get("sent_zh") if mapping.get("sent_zh") != "(無)" else None
-        a_mean = mapping.get("meaning_zh") if mapping.get("meaning_zh") != "(無)" else None
+# ===================== 狀態 =====================
 
-    def pick(row, col):
-        if col and col in row and pd.notna(row[col]):
-            return str(row[col]).strip()
-        return ""
-
-    bank = []
-    for _, row in df.iterrows():
-        item = {
-            "answer_en":  pick(row, a_ans),
-            "cloze_en":   pick(row, a_en),
-            "sent_zh":    pick(row, a_zh),
-            "meaning_zh": pick(row, a_mean),
-        }
-        if item["cloze_en"] and item["answer_en"]:
-            bank.append(item)
-
-    uniq = {}
-    for it in bank:
-        uniq[(it["cloze_en"], it["answer_en"])] = it
-    return list(uniq.values()), (a_ans, a_en, a_zh, a_mean)
-
-# ===================== 側欄：題庫連結 =====================
-with st.sidebar:
-    st.header("題庫連結（必填）")
-    st.markdown("<div class='sidebar-spacer'></div>", unsafe_allow_html=True)
-
-    url_input = st.text_input(
-        "貼上 Google Drive / Google Sheets 連結（公開可讀）",
-        placeholder="https://docs.google.com/spreadsheets/d/xxxxxxxxxxxxxxxxxxxx/edit"
-    )
-    st.caption("⚠️ 若手機上傳出現 Network/Axios 錯誤，建議改貼公開分享連結，或換 Safari / Firefox。")
-
-    if st.button("讀取題庫", use_container_width=True):
-        df = read_question_bank(url_input)
-        if df is not None:
-            st.success("題庫讀取成功！下方預覽前 20 列。")
-            st.dataframe(df.head(20), use_container_width=True)
-            st.session_state["question_bank_df"] = df
-            # 讀到題庫就清空既有遊戲狀態（避免殘留）
-            for k in ["QUESTION_BANK", "round", "used_answers", "cur_round_qidx",
-                      "cur_idx_in_round", "records", "score_this_round",
-                      "submitted", "last_feedback", "options_cache", "text_input_cache"]:
-                if k in st.session_state: del st.session_state[k]
-
-# 若尚未載入題庫：顯示提示（往下挪，避免被切到）
-if "question_bank_df" not in st.session_state:
-    st.markdown(
-        "<div class='subtle-callout' style='margin-top: 48px;'>請先在&gt;&gt;貼上 Google Sheets/Drive 連結</div>",
-        unsafe_allow_html=True
-    )
-    st.stop()
-
-# ===================== 欄位對應（載入後顯示） =====================
-_df = st.session_state["question_bank_df"]
-detected_cols = infer_columns(_df)
-
-with st.sidebar:
-    st.markdown("### 欄位對應（若自動偵測錯誤可手動指定）")
-    cols = list(_df.columns)
-    answer_en = st.selectbox("正解英文（Answer）", options=cols, index=cols.index(detected_cols[0]) if detected_cols[0] in cols else 0)
-    cloze_en  = st.selectbox("題幹英文（Cloze Sentence）", options=cols, index=cols.index(detected_cols[1]) if detected_cols[1] in cols else 0)
-    sent_zh   = st.selectbox("題幹中文（Sentence Translation (Chinese)）", options=["(無)"] + cols,
-                             index=(cols.index(detected_cols[2])+1) if detected_cols[2] in cols else 0)
-    meaning_zh= st.selectbox("中文義（Meaning (Chinese)）", options=["(無)"] + cols,
-                             index=(cols.index(detected_cols[3])+1) if detected_cols[3] in cols else 0)
-    mapping = {"answer_en": answer_en, "cloze_en": cloze_en, "sent_zh": sent_zh, "meaning_zh": meaning_zh}
-
-# 依對應建立題庫
-QUESTION_BANK, _ = build_question_bank_from_df(_df, mapping=mapping)
-
-# ===================== 狀態（確保題目會出現） =====================
 def init_state():
+    # 作答者資訊
+    st.session_state.user_name = ""
+    st.session_state.user_class = ""
+    st.session_state.user_seat = ""
+
+    st.session_state.session_id = str(uuid.uuid4())
+
+    # 回合/題目
     st.session_state.mode = MODE_1
-    st.session_state.round = 1
-    st.session_state.used_answers = set()
+    st.session_state.round_active = True
     st.session_state.cur_round_qidx = []
-    st.session_state.cur_idx_in_round = 0
-    st.session_state.records = []   # (round, prompt, chosen, correct_en, is_correct, opts_disp, opts_val)
-    st.session_state.score_this_round = 0
+    st.session_state.cur_ptr = 0
+    st.session_state.records = []  # 暫存（本回合）
     st.session_state.submitted = False
-    st.session_state.last_feedback = ""
     st.session_state.options_cache = {}
     st.session_state.text_input_cache = ""
-    st.session_state["QUESTION_BANK"] = QUESTION_BANK[:]  # 保存在 session（避免重建時長度變動）
 
-def start_new_round():
-    bank = st.session_state["QUESTION_BANK"]
-    available = [i for i, it in enumerate(bank) if it["answer_en"] not in st.session_state.used_answers]
-    chosen = available if len(available) < QUESTIONS_PER_ROUND else random.sample(available, QUESTIONS_PER_ROUND)
+    # 力量模式
+    st.session_state.summary_records = None
+    st.session_state.power_mode = False
+    st.session_state.power_qidx = []
+    st.session_state.power_ptr = 0
+    st.session_state.power_failed = False
+
+    # 終極力量回合
+    st.session_state.ultimate_mode = False
+    st.session_state.ultimate_qidx = []
+    st.session_state.ultimate_ptr = 0
+    st.session_state.ultimate_failed = False
+
+    # 結束頁
+    st.session_state.ended = False
+
+
+def start_round():
+    all_idx = list(range(len(QUESTION_BANK)))
+    chosen = random.sample(all_idx, k=min(QUESTIONS_PER_ROUND, len(all_idx)))
     st.session_state.cur_round_qidx = chosen
-    st.session_state.cur_idx_in_round = 0
-    st.session_state.score_this_round = 0
+    st.session_state.cur_ptr = 0
     st.session_state.submitted = False
-    st.session_state.last_feedback = ""
     st.session_state.options_cache = {}
     st.session_state.text_input_cache = ""
+    st.session_state.records = []
 
-# 若是第一次載入或換了 df，初始化遊戲
-if "round" not in st.session_state:
+
+if "session_id" not in st.session_state:
     init_state()
-    start_new_round()
-else:
-    # 若題庫長度變了（換表/換映射）→ 重置
-    if "QUESTION_BANK" not in st.session_state or len(st.session_state["QUESTION_BANK"]) != len(QUESTION_BANK):
-        init_state()
-        start_new_round()
+    start_round()
 
-# 沒題庫可出題
-if len(st.session_state["QUESTION_BANK"]) < 10:
-    st.error("題庫少於 10 題，無法進行回合制。請檢查欄位對應與資料內容。")
-    st.stop()
+# ===================== 寫出紀錄 =====================
 
-# ===================== 三種模式選擇（主畫面可隨時切換） =====================
-st.session_state.mode = st.radio("選擇練習模式：", [MODE_1, MODE_2, MODE_3], horizontal=True)
+CSV_PATH = "responses.csv"  # 本機 CSV 路徑
 
-# ===================== 出題顯示 & 互動 =====================
+
+def _now_ts():
+    return dt.datetime.now().isoformat(timespec="seconds")
+
+
+def append_to_local_csv(rows):
+    exists = os.path.exists(CSV_PATH)
+    with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        if not exists:
+            w.writerow([
+                "timestamp", "session_id", "name", "class", "seat",
+                "phase", "mode", "q_label", "q_id", "prompt",
+                "answer_en", "user_answer", "is_correct",
+            ])
+        for r in rows:
+            w.writerow(r)
+
+
+def append_to_gsheet(rows):
+    if not _GS_OK:
+        return False, "GS not configured"
+    try:
+        _gs_worksheet.append_rows(rows, value_input_option="RAW")
+        return True, "OK"
+    except Exception as e:
+        return False, str(e)
+
+
+def persist_records(phase: str):
+    # 將 st.session_state.records 寫出成 rows
+    name = st.session_state.get("user_name", "")
+    klass = st.session_state.get("user_class", "")
+    seat = st.session_state.get("user_seat", "")
+    sid = st.session_state.get("session_id", "")
+    rows = []
+    for rec in st.session_state.records:
+        # rec = (idx_label, prompt, chosen_label, correct_en, is_correct, mode, qidx_cache)
+        idx_label, prompt, chosen, correct_en, is_correct, mode, qidx = rec
+        rows.append([
+            _now_ts(), sid, name, klass, seat,
+            phase, mode.replace("\n", " "), idx_label, qidx,
+            prompt, correct_en, chosen, str(bool(is_correct))
+        ])
+
+    # 先嘗試 Google Sheet
+    ok, msg = (True, "SKIP")
+    if _GS_OK:
+        ok, msg = append_to_gsheet(rows)
+    if not ok:
+        append_to_local_csv(rows)
+    return ok, msg
+
+# ===================== 側欄 =====================
+with st.sidebar:
+    st.markdown("### 設定 / 身分")
+    st.session_state.user_name = st.text_input("姓名", st.session_state.get("user_name", ""))
+    st.session_state.user_class = st.text_input("班級", st.session_state.get("user_class", ""))
+    st.session_state.user_seat = st.text_input("座號", st.session_state.get("user_seat", ""))
+
+    can_change_mode = (
+        st.session_state.cur_ptr == 0 and
+        not st.session_state.submitted and
+        st.session_state.round_active and
+        len(st.session_state.records) == 0 and
+        not st.session_state.power_mode and
+        not st.session_state.ultimate_mode and
+        not st.session_state.ended
+    )
+    st.session_state.mode = st.radio("選擇練習模式", [MODE_1, MODE_2, MODE_3], index=0, disabled=not can_change_mode)
+
+    # 儀表板連結
+    base_url = "?" + urlencode({"view": "dashboard"})
+    st.markdown(f"[📈 查看作答情況（儀表板）]({base_url})")
+
+    if st.button("🔄 重新開始"):
+        init_state(); start_round(); st.experimental_rerun()
+
+# ===================== 選項產生 =====================
+
 def get_options_for_q(qidx, mode):
     key = (qidx, mode)
     if key in st.session_state.options_cache:
         return st.session_state.options_cache[key]
-
-    item = st.session_state["QUESTION_BANK"][qidx]
+    item = QUESTION_BANK[qidx]
     correct_en = item["answer_en"].strip()
     correct_zh = (item.get("meaning_zh") or "").strip()
-    payload = {"display": [], "value": []}
-
     if mode == MODE_2:
-        # 中文選項（值＝英文）
-        pool = list({(it.get("meaning_zh") or "").strip() for it in st.session_state["QUESTION_BANK"]
+        pool = list({(it.get("meaning_zh") or "").strip()
+                     for it in QUESTION_BANK
                      if (it.get("meaning_zh") or "").strip() and (it.get("meaning_zh") or "").strip() != correct_zh})
         distractors = random.sample(pool, k=min(3, len(pool)))
-        display = list(dict.fromkeys([correct_zh] + distractors))
-        random.shuffle(display)
-        value = []
-        for zh in display:
-            en = next((it["answer_en"] for it in st.session_state["QUESTION_BANK"]
-                       if (it.get("meaning_zh") or "").strip() == zh), "")
-            value.append(str(en).strip())
-        payload = {"display": display, "value": value}
-
+        display = list(dict.fromkeys([correct_zh] + distractors)); random.shuffle(display)
+        payload = {"display": display}
     elif mode == MODE_3:
-        # 英文選項（值＝英文）
-        pool = list({it["answer_en"].strip() for it in st.session_state["QUESTION_BANK"]
-                     if it.get("answer_en") and it["answer_en"].strip() and it["answer_en"].strip() != correct_en})
+        pool = list({it["answer_en"].strip()
+                     for it in QUESTION_BANK if it["answer_en"].strip() and it["answer_en"].strip() != correct_en})
         distractors = random.sample(pool, k=min(3, len(pool)))
-        display = list(dict.fromkeys([correct_en] + distractors))
-        random.shuffle(display)
-        payload = {"display": display, "value": display[:]}
-
+        display = list(dict.fromkeys([correct_en] + distractors)); random.shuffle(display)
+        payload = {"display": display}
+    else:
+        payload = {"display": []}
     st.session_state.options_cache[key] = payload
     return payload
 
-def render_top_card():
-    r = st.session_state.round
-    i = st.session_state.cur_idx_in_round + 1
-    n = len(st.session_state.cur_round_qidx)
-    percent = int(i / n * 100) if n else 0
-    st.markdown(
-        f"""
-        <div class="progress-card" style='background-color:#f5f5f5; padding:9px 14px; border-radius:12px;'>
-            <div style='display:flex; align-items:center; justify-content:space-between; margin-bottom:4px;'>
-                <div style='font-size:18px;'>🎯 第 {r} 回合｜進度：{i} / {n}</div>
-                <div style='font-size:16px; color:#555;'>{percent}%</div>
-            </div>
-            <progress value='{i}' max='{n if n else 1}' style='width:100%; height:14px;'></progress>
+# ===================== UI 共用 =====================
+
+def render_progress(i, n, power=False):
+    klass = "progress-card-power" if power else "progress-card-normal"
+    st.markdown(f"""
+        <div class="{klass}">
+          <progress value='{i}' max='{n if n else 1}'></progress>
         </div>
-        """,
-        unsafe_allow_html=True
-    )
+        """, unsafe_allow_html=True)
 
-def render_question():
-    bank = st.session_state["QUESTION_BANK"]
-    cur_pos = st.session_state.cur_idx_in_round
-    qidx = st.session_state.cur_round_qidx[cur_pos]
-    q = bank[qidx]
+
+def render_question(global_idx, label_no, power=False):
+    if power:
+        st.markdown(NEON_BLACK_CSS, unsafe_allow_html=True)
+    q = QUESTION_BANK[global_idx]
     mode = st.session_state.mode
 
+    # 題目
     if mode == MODE_3:
-        prompt = (q.get("sent_zh") or "").strip()
-        st.markdown(f"<h2>Q{cur_pos + 1}. {prompt if prompt else '（此題缺少中文題幹）'}</h2>", unsafe_allow_html=True)
+        prompt = q.get("sent_zh", "").strip()
+        st.markdown(f"<h2>Q{label_no}. {prompt if prompt else '（此題缺少中文題幹）'}</h2>", unsafe_allow_html=True)
     else:
-        st.markdown(f"<h2>Q{cur_pos + 1}. {q['cloze_en']}</h2>", unsafe_allow_html=True)
+        st.markdown(f"<h2>Q{label_no}. {q['cloze_en']}</h2>", unsafe_allow_html=True)
         if mode == MODE_1 and q.get("sent_zh"):
-            st.markdown(f"<div class='zh-blue'>📘 {q['sent_zh']}</div>", unsafe_allow_html=True)
+            st.caption(q['sent_zh'])
 
+    # 輸入/選項
     if mode == MODE_1:
-        user_text = st.text_input("請輸入英文答案：", key=f"ti_{qidx}", value=st.session_state.text_input_cache)
-        return qidx, q, user_text
+        user_text = st.text_input("", key=f"ti_{global_idx}_{label_no}",
+                                  value=st.session_state.text_input_cache,
+                                  label_visibility="collapsed")
+        return q, ("TEXT", user_text)
     else:
-        payload = get_options_for_q(qidx, mode)
-        options_disp = payload["display"]
-        if not options_disp:
-            st.markdown("<div class='subtle-callout'>此題沒有可用選項，請檢查題庫欄位內容。</div>", unsafe_allow_html=True)
-            user_choice_disp = None
-        else:
-            user_choice_disp = st.radio("", options_disp, key=f"mc_{qidx}", label_visibility="collapsed")
-        return qidx, q, (user_choice_disp, payload)
+        payload = get_options_for_q(global_idx, mode)
+        options = payload["display"]
+        choice = st.radio("", options if options else [],
+                          key=f"mc_{global_idx}_{label_no}",
+                          label_visibility="collapsed") if options else None
+        if not options:
+            st.info("No options to select.")
+        return q, ("MC", (choice, payload))
 
-def handle_action(qidx, q, user_input):
-    mode = st.session_state.mode
-    correct_en = (q.get("answer_en") or "").strip()
 
-    if mode == MODE_1:
-        user_ans = (user_input or "").strip()
-        is_correct = (user_ans.lower() == correct_en.lower()) if correct_en else False
-        chosen_label = user_ans
-        opts_disp, opts_val = [], []
+def record(idx_label, q, chosen_label, is_correct, qidx_cache):
+    st.session_state.records.append((
+        idx_label,
+        q["cloze_en"] if st.session_state.mode != MODE_3 else q.get("sent_zh", ""),
+        chosen_label,
+        q["answer_en"].strip(),
+        is_correct,
+        st.session_state.mode,
+        qidx_cache
+    ))
+
+
+def explain_block(q, mode, is_correct, payload=None):
+    en = q["answer_en"].strip()
+    zh = (q.get("meaning_zh") or "").strip()
+    if mode == MODE_2:
+        badge = "<span class='badge ok'>✅ 答對</span>" if is_correct else "<span class='badge bad'>❌ 答錯</span>"
+        body = f"{zh}（{en}）"
+        st.markdown(f"<div class='explain'>{badge}{body}</div>", unsafe_allow_html=True)
+    elif mode == MODE_3:
+        en2zh = {it['answer_en'].strip(): (it.get('meaning_zh') or '').strip() for it in QUESTION_BANK}
+        opts = (payload or {}).get("display", [])
+        lines = []
+        for e in opts:
+            e_s = str(e).strip()
+            tag = " ✅" if _norm(e_s) == _norm(en) else ""
+            lines.append(f"- {e_s}（{en2zh.get(e_s, '')}）{tag}")
+        st.markdown(f"<div class='explain'><div class='opt-list'>{'<br/>'.join(lines)}</div></div>", unsafe_allow_html=True)
     else:
-        chosen_disp, payload = user_input
-        if chosen_disp is None:
-            st.warning("請先選擇一個選項。")
-            return
-        options_disp = payload["display"]
-        options_val  = payload["value"]
+        st.markdown(f"<div class='explain'><span class='badge {'ok' if is_correct else 'bad'}'>{'✅ 答對' if is_correct else '❌ 答錯'}</span>{en}（{zh}）</div>", unsafe_allow_html=True)
 
-        try:
-            idx = options_disp.index(chosen_disp)
-            chosen_value = options_val[idx] if idx < len(options_val) else ""
-        except ValueError:
-            chosen_value = ""
+# ===================== 一般模式頁 =====================
 
-        if mode == MODE_2:
-            is_correct = (chosen_value.strip().lower() == correct_en.lower())
-            chosen_label = chosen_disp  # 顯示中文
-        else:
-            is_correct = (chosen_disp.strip().lower() == correct_en.lower())
-            chosen_label = chosen_disp  # 顯示英文
+def normal_mode_page():
+    cur_ptr = st.session_state.cur_ptr
+    show_qidx = st.session_state.cur_round_qidx[cur_ptr]
+    label_no = cur_ptr + 1
 
-        opts_disp, opts_val = options_disp, options_val
+    render_progress(cur_ptr + 1, len(st.session_state.cur_round_qidx), power=False)
+    q, uinput = render_question(show_qidx, label_no, power=False)
 
     if not st.session_state.submitted:
-        st.session_state.submitted = True
-        st.session_state.records.append((
-            st.session_state.round,
-            q["cloze_en"] if mode != MODE_3 else (q.get("sent_zh") or ""),
-            chosen_label,
-            correct_en,
-            is_correct,
-            opts_disp,
-            opts_val,
-        ))
-        if is_correct:
-            st.session_state.last_feedback = "<div class='feedback-small feedback-correct'>✅ 回答正確</div>"
-            st.session_state.score_this_round += 1
-        else:
-            st.session_state.last_feedback = f"<div class='feedback-small feedback-wrong'>❌ Incorrect. 正確答案：{correct_en}</div>"
-        st.rerun()
-    else:
-        st.session_state.used_answers.add(correct_en)
-        st.session_state.cur_idx_in_round += 1
-        st.session_state.submitted = False
-        st.session_state.last_feedback = ""
-        st.session_state.text_input_cache = ""
-        if st.session_state.cur_idx_in_round >= len(st.session_state.cur_round_qidx):
-            if (st.session_state.score_this_round == len(st.session_state.cur_round_qidx)) and (st.session_state.round < MAX_ROUNDS):
-                st.session_state.round += 1
-                start_new_round()
+        if st.button("送出答案", key="submit_normal", use_container_width=True):
+            correct_en = q["answer_en"].strip()
+            correct_zh = (q.get("meaning_zh") or "").strip()
+            mode = st.session_state.mode
+
+            if uinput[0] == "TEXT":
+                ans = (uinput[1] or "").strip()
+                is_correct = is_free_text_correct(ans, correct_en)
+                record(label_no, q, ans, is_correct, show_qidx)
             else:
-                st.session_state.round = None
-        st.rerun()
+                chosen_disp, _ = uinput[1]
+                if chosen_disp is None:
+                    st.warning("請先選擇一個選項。"); st.stop()
+                is_correct = (_norm(chosen_disp) == _norm(correct_zh)) if mode == MODE_2 else (_norm(chosen_disp) == _norm(correct_en))
+                record(label_no, q, chosen_disp, is_correct, show_qidx)
 
-# ===================== 主畫面 =====================
-if st.session_state.round:
-    render_top_card()
-    qidx, q, user_input = render_question()
+            st.session_state.submitted = True
+            st.experimental_rerun()
+    else:
+        payload = uinput[1][1] if (uinput[0] == "MC") else None
+        last_correct = st.session_state.records[-1][4]
+        explain_block(q, st.session_state.mode, last_correct, payload)
 
-    if st.session_state.submitted and st.session_state.last_feedback:
-        st.markdown(st.session_state.last_feedback, unsafe_allow_html=True)
+        if st.button("下一題", key="next_normal", use_container_width=True):
+            st.session_state.submitted = False
+            st.session_state.text_input_cache = ""
+            st.session_state.cur_ptr += 1
+            if st.session_state.cur_ptr >= len(st.session_state.cur_round_qidx):
+                st.session_state.round_active = False
+                st.session_state.summary_records = st.session_state.records[:]
+                # 回合結束，寫出作答紀錄（phase = Normal）
+                ok, msg = persist_records("Normal")
+                if _GS_OK and not ok:
+                    st.warning(f"寫入 Google Sheet 失敗，已改存本機 CSV：{msg}")
+            st.experimental_rerun()
 
-    action_label = "下一題" if st.session_state.submitted else "送出答案"
-    if st.button(action_label, key="action_btn"):
-        handle_action(qidx, q, user_input)
+# ===================== Summary =====================
 
-    if st.session_state.submitted and st.session_state.records:
-        last = st.session_state.records[-1]
-        _, _, _, correct_en, _, opts_disp, opts_val = last
+def summary_page():
+    st.session_state.submitted = False
 
-        en2zh = { (it.get("answer_en") or "").strip(): (it.get("meaning_zh") or "").strip()
-                  for it in st.session_state["QUESTION_BANK"] }
+    recs = st.session_state.summary_records or []
+    total = len(recs); correct = sum(1 for r in recs if r[4])
+    acc = (correct / total * 100) if total else 0.0
 
-        correct_zh = en2zh.get(correct_en, "")
-        st.markdown("---")
-        st.markdown(f"**正確答案：{correct_en}**　({correct_zh})")
-
-        if st.session_state.mode == MODE_2 and opts_disp:
-            pairs = []
-            for zh, en in zip(opts_disp, (opts_val or [])):
-                zh_s, en_s = str(zh).strip(), str(en).strip()
-                if zh_s and en_s:
-                    pairs.append(f"{zh_s}：{en_s}")
-            if pairs:
-                st.markdown("**本題所有選項的選項：**  ")
-                st.markdown("、".join(pairs))
-
-        if st.session_state.mode == MODE_3 and opts_disp:
-            pairs = []
-            for en in opts_disp:
-                en_s = str(en).strip()
-                if not en_s:
-                    continue
-                zh_s = en2zh.get(en_s, "")
-                pairs.append(f"{en_s}：{zh_s if zh_s else '(無中文)'}")
-            if pairs:
-                st.markdown("**本題所有選項的選項：**  ")
-                st.markdown("、".join(pairs))
-
-else:
-    total_answered = len(st.session_state.records)
-    total_correct = sum(1 for rec in st.session_state.records if rec[4])
     st.subheader("📊 總結")
-    st.markdown(f"<h3>Total Answered: {total_answered}</h3>", unsafe_allow_html=True)
-    st.markdown(f"<h3>Total Correct: {total_correct}</h3>", unsafe_allow_html=True)
-    acc = (total_correct / total_answered * 100) if total_answered else 0.0
-    st.markdown(f"<h3>Accuracy: {acc:.1f}%</h3>", unsafe_allow_html=True)
-    if st.button("🔄 再玩一次"):
-        # 重新開始但沿用同一份題庫
-        for k in ["round", "used_answers", "cur_round_qidx", "cur_idx_in_round",
-                  "records", "score_this_round", "submitted", "last_feedback",
-                  "options_cache", "text_input_cache"]:
-            if k in st.session_state: del st.session_state[k]
-        init_state()
-        start_new_round()
-        st.rerun()
+    st.markdown(f"**Total Answered:** {total}")
+    st.markdown(f"**Total Correct:** {correct}")
+    st.markdown(f"**Accuracy:** {acc:.1f}%")
+
+    wrongs = [r for r in recs if not r[4]]
+    st.markdown("### ❌ 錯題總覽")
+    if not wrongs:
+        st.info("本回合無錯題！")
+    else:
+        for idx_label, prompt, chosen, correct_en, _, _, _ in wrongs:
+            en2zh = {it["answer_en"].strip(): (it.get("meaning_zh") or "").strip() for it in QUESTION_BANK}
+            st.markdown(f"- **Q{idx_label}**：{prompt}")
+            st.markdown(f"　你的答案：`{chosen}`")
+            st.markdown(f"　正確答案：`{correct_en}`（{en2zh.get(correct_en, '')}）")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🔁 再玩一次", use_container_width=True):
+            init_state(); start_round(); st.experimental_rerun()
+    with c2:
+        if correct == total and total == QUESTIONS_PER_ROUND:
+            if st.button("⚡ 你渴望力量嗎", use_container_width=True):
+                used_answers = {QUESTION_BANK[i]["answer_en"] for i in st.session_state.cur_round_qidx}
+                remain_idx = [i for i, it in enumerate(QUESTION_BANK) if it["answer_en"] not in used_answers]
+                pick_n = min(20, len(remain_idx))   # Q11~Q30 20題（本題庫 11 題，通常為 0）
+                st.session_state.power_qidx = random.sample(remain_idx, k=pick_n) if pick_n > 0 else []
+                st.session_state.power_ptr = 0
+                st.session_state.power_failed = False
+                st.session_state.power_mode = True
+                st.session_state.submitted = False
+                st.experimental_rerun()
+
+# ===================== 力量模式 =====================
+
+def power_mode_page():
+    st.markdown(NEON_BLACK_CSS, unsafe_allow_html=True)
+    total = len(st.session_state.power_qidx)
+
+    # 結束/失敗
+    if st.session_state.power_ptr >= total or (st.session_state.power_failed and not st.session_state.submitted):
+        if st.session_state.power_failed:
+            st.markdown("<div class='gameover'>GAME OVER</div>", unsafe_allow_html=True)
+            st.markdown("<div class='devil'>😈</div>", unsafe_allow_html=True)
+            st.caption("力量模式：答錯即止。再接再厲！")
+        else:
+            st.markdown("<h2 style='color:#fff;'>🎉 你征服了力量模式！</h2>", unsafe_allow_html=True)
+            st.write(f"你通過了 **{total} / {total}** 題。")
+        # 寫出力量模式紀錄
+        if total > 0:
+            ok, msg = persist_records("Power")
+            if _GS_OK and not ok:
+                st.warning(f"寫入 Google Sheet 失敗，已改存本機 CSV：{msg}")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("🔁 回到一般模式再來", use_container_width=True):
+                init_state(); start_round(); st.experimental_rerun()
+        with c2:
+            if st.button("💥 終極力量回合", use_container_width=True):
+                used = {QUESTION_BANK[i]["answer_en"] for i in st.session_state.cur_round_qidx} \
+                       | {QUESTION_BANK[i]["answer_en"] for i in st.session_state.power_qidx}
+                remain_idx = [i for i, it in enumerate(QUESTION_BANK) if it["answer_en"] not in used]
+                max_n = min(30, len(remain_idx))
+                if max_n == 0:
+                    st.session_state.ended = True
+                    st.session_state.power_mode = False
+                    st.experimental_rerun()
+                st.session_state.ultimate_qidx = random.sample(remain_idx, k=max_n) if max_n > 0 else []
+                st.session_state.ultimate_ptr = 0
+                st.session_state.ultimate_failed = False
+                st.session_state.ultimate_mode = True
+                st.session_state.power_mode = False
+                st.session_state.submitted = False
+                st.experimental_rerun()
+        st.stop()
+
+    cur = st.session_state.power_ptr
+    show_qidx = st.session_state.power_qidx[cur]
+    label_no = 11 + cur
+
+    render_progress(cur + 1, total, power=True)
+    q, uinput = render_question(show_qidx, label_no, power=True)
+
+    if not st.session_state.submitted:
+        if st.button("送出答案", key="submit_power", use_container_width=True):
+            correct_en = q["answer_en"].strip()
+            correct_zh = (q.get("meaning_zh") or "").strip()
+            mode = st.session_state.mode
+
+            if uinput[0] == "TEXT":
+                ans = (uinput[1] or "").strip()
+                is_correct = is_free_text_correct(ans, correct_en)
+            else:
+                chosen_disp, _ = uinput[1]
+                if chosen_disp is None:
+                    st.warning("請先選擇一個選項。"); st.stop()
+                is_correct = (_norm(chosen_disp) == _norm(correct_zh)) if mode == MODE_2 else (_norm(chosen_disp) == _norm(correct_en))
+
+            st.session_state.submitted = True
+            if not is_correct:
+                st.session_state.power_failed = True
+            st.experimental_rerun()
+    else:
+        payload = uinput[1][1] if (uinput[0] == "MC") else None
+        mode = st.session_state.mode
+        en = q["answer_en"].strip(); zh = (q.get("meaning_zh") or "").strip()
+        if uinput[0] == "TEXT":
+            was_correct = is_free_text_correct(uinput[1] or "", en)
+        else:
+            chosen_disp, _ = uinput[1]
+            was_correct = (_norm(chosen_disp) == _norm(zh)) if mode == MODE_2 else (_norm(chosen_disp) == _norm(en))
+        explain_block(q, mode, was_correct, payload)
+
+        if st.button("下一題", key="next_power", use_container_width=True):
+            st.session_state.submitted = False
+            if not st.session_state.power_failed:
+                st.session_state.power_ptr += 1
+            st.experimental_rerun()
+
+# ===================== 終極力量回合 =====================
+
+def ultimate_mode_page():
+    st.markdown(NEON_BLACK_CSS, unsafe_allow_html=True)
+    total = len(st.session_state.ultimate_qidx)
+
+    if st.session_state.ultimate_ptr >= total or (st.session_state.ultimate_failed and not st.session_state.submitted):
+        if st.session_state.ultimate_failed:
+            st.markdown("<div class='gameover'>GAME OVER</div>", unsafe_allow_html=True)
+            st.markdown("<div class='devil'>😈</div>", unsafe_allow_html=True)
+            st.caption("終極力量回合：答錯即止。")
+        else:
+            st.markdown("<h2 style='color:#fff;'>🏆 你征服了終極力量回合！</h2>", unsafe_allow_html=True)
+            st.write(f"你通過了 **{total} / {total}** 題。")
+        # 寫出紀錄
+        if total > 0:
+            ok, msg = persist_records("Ultimate")
+            if _GS_OK and not ok:
+                st.warning(f"寫入 Google Sheet 失敗，已改存本機 CSV：{msg}")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("🔁 回到一般模式再來", use_container_width=True):
+                init_state(); start_round(); st.experimental_rerun()
+        with c2:
+            if st.button("🏁 結束", use_container_width=True):
+                st.session_state.ended = True
+                st.session_state.ultimate_mode = False
+                st.experimental_rerun()
+        st.stop()
+
+    cur = st.session_state.ultimate_ptr
+    show_qidx = st.session_state.ultimate_qidx[cur]
+    label_no = 31 + cur  # Q31 起
+
+    render_progress(cur + 1, total, power=True)
+    q, uinput = render_question(show_qidx, label_no, power=True)
+
+    if not st.session_state.submitted:
+        if st.button("送出答案", key="submit_ultimate", use_container_width=True):
+            correct_en = q["answer_en"].strip()
+            correct_zh = (q.get("meaning_zh") or "").strip()
+            mode = st.session_state.mode
+
+            if uinput[0] == "TEXT":
+                ans = (uinput[1] or "").strip()
+                is_correct = is_free_text_correct(ans, correct_en)
+            else:
+                chosen_disp, _ = uinput[1]
+                if chosen_disp is None:
+                    st.warning("請先選擇一個選項。"); st.stop()
+                is_correct = (_norm(chosen_disp) == _norm(correct_zh)) if mode == MODE_2 else (_norm(chosen_disp) == _norm(correct_en))
+
+            st.session_state.submitted = True
+            if not is_correct:
+                st.session_state.ultimate_failed = True
+            st.experimental_rerun()
+    else:
+        payload = uinput[1][1] if (uinput[0] == "MC") else None
+        mode = st.session_state.mode
+        en = q["answer_en"].strip(); zh = (q.get("meaning_zh") or "").strip()
+        if uinput[0] == "TEXT":
+            was_correct = is_free_text_correct(uinput[1] or "", en)
+        else:
+            chosen_disp, _ = uinput[1]
+            was_correct = (_norm(chosen_disp) == _norm(zh)) if mode == MODE_2 else (_norm(chosen_disp) == _norm(en))
+        explain_block(q, mode, was_correct, payload)
+
+        if st.button("下一題", key="next_ultimate", use_container_width=True):
+            st.session_state.submitted = False
+            if not st.session_state.ultimate_failed:
+                st.session_state.ultimate_ptr += 1
+            st.experimental_rerun()
+
+# ===================== 結束頁 =====================
+
+def end_page():
+    st.markdown(NEON_BLACK_CSS, unsafe_allow_html=True)
+    st.markdown("""
+    <div style="text-align:center; margin-top:2.2rem; color:#fff;">
+      <h1 style="color:#ff3d81; text-shadow:0 0 14px rgba(255,61,129,.7);">SEE YOU AGAIN</h1>
+      <p style="font-size:22px; opacity:.92;">期待你再來挑戰，否則你將永遠被困在題庫之中，哇哈哈哈哈 👹</p>
+    </div>
+    """, unsafe_allow_html=True)
+    if st.button("🔁 回到首頁", use_container_width=True):
+        init_state(); start_round(); st.experimental_rerun()
+
+# ===================== 儀表板（查看作答情況） =====================
+
+def dashboard_page():
+    st.title("📈 作答情況儀表板")
+    st.caption("若已設定 Google Sheet，資料會寫入該 Sheet 的 responses 工作表；否則讀取本機 responses.csv。")
+
+    # 顯示連結（若為 Google Sheet）
+    if _GS_OK:
+        sid = st.secrets["gsheets"]["spreadsheet_id"]
+        sheet_url = f"https://docs.google.com/spreadsheets/d/{sid}"
+        st.markdown(f"**Google Sheet：** [{sheet_url}]({sheet_url})")
+
+    # 讀取資料顯示（表格）
+    import pandas as pd
+    df = None
+    if _GS_OK:
+        try:
+            ws = _gs_worksheet.get_all_values()
+            if ws and len(ws) > 1:
+                header, data = ws[0], ws[1:]
+                df = pd.DataFrame(data, columns=header)
+        except Exception as e:
+            st.warning(f"讀取 Google Sheet 失敗：{e}")
+    if df is None and os.path.exists(CSV_PATH):
+        df = pd.read_csv(CSV_PATH)
+
+    if df is None or df.empty:
+        st.info("目前尚無資料。先讓同學完成一回合作答再回來看吧！")
+        return
+
+    # 簡要統計
+    st.markdown("### 概覽")
+    total = len(df)
+    acc = (df["is_correct"].astype(str).str.lower() == "true").mean() * 100 if total else 0
+    st.write(f"總作答筆數：**{total}**，整體正確率：約 **{acc:.1f}%**")
+
+    # 篩選器
+    cols = st.columns(4)
+    with cols[0]:
+        name_f = st.text_input("依姓名篩選")
+    with cols[1]:
+        class_f = st.text_input("依班級篩選")
+    with cols[2]:
+        mode_f = st.selectbox("模式", options=["", MODE_1, MODE_2, MODE_3])
+    with cols[3]:
+        phase_f = st.selectbox("回合", options=["", "Normal", "Power", "Ultimate"])
+
+    if name_f:
+        df = df[df["name"].astype(str).str.contains(name_f, case=False, na=False)]
+    if class_f:
+        df = df[df["class"].astype(str).str.contains(class_f, case=False, na=False)]
+    if mode_f:
+        df = df[df["mode"] == mode_f.replace("\n", " ")]
+    if phase_f:
+        df = df[df["phase"] == phase_f]
+
+    st.dataframe(df, use_container_width=True)
+
+    # 提供本機 CSV 下載（若存在）
+    if os.path.exists(CSV_PATH):
+        with open(CSV_PATH, "rb") as f:
+            st.download_button("⬇️ 下載本機 CSV（備份）", data=f, file_name="responses.csv", mime="text/csv")
+
+# ===================== 路由 =====================
+
+if VIEW_DASHBOARD:
+    dashboard_page()
+else:
+    if st.session_state.ended:
+        end_page()
+    else:
+        if st.session_state.round_active:
+            normal_mode_page()
+        elif st.session_state.power_mode:
+            power_mode_page()
+        elif st.session_state.ultimate_mode:
+            ultimate_mode_page()
+        else:
+            summary_page()
