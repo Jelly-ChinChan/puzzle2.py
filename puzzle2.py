@@ -5,13 +5,16 @@ import datetime as dt
 import uuid
 import json
 
-# ====== Google Sheet ======
+# ====== Google Sheet 連線 ======
 _GS_OK = False
 _gs_worksheet = None
 _SHEET_NAME = "responses"
 
 def _now_ts():
     return dt.datetime.now().isoformat(timespec="seconds")
+
+def _clean_mode(mode_obj) -> str:
+    return str(mode_obj).replace("\n", " ")
 
 def _connect_gsheet():
     """讀取 st.secrets['gsheets']，建立 worksheet 連線（若沒設就回 False）"""
@@ -23,6 +26,7 @@ def _connect_gsheet():
         if not (sid and saj):
             _GS_OK = False
             return False, "Secrets 未設定 gsheets"
+
         from google.oauth2.service_account import Credentials
         import gspread
 
@@ -32,7 +36,6 @@ def _connect_gsheet():
         ])
         gc = gspread.authorize(creds)
         sh = gc.open_by_key(sid)
-        # 取工作表；沒有就建立
         try:
             ws = sh.worksheet(_SHEET_NAME)
         except Exception:
@@ -48,9 +51,6 @@ def _connect_gsheet():
     except Exception as e:
         _GS_OK = False
         return False, str(e)
-
-def _clean_mode(mode_obj) -> str:
-    return str(mode_obj).replace("\n", " ")
 
 def append_to_gsheet(rows):
     """rows: List[List]"""
@@ -150,7 +150,7 @@ def init_state():
     st.session_state.used_answers = set()
     st.session_state.cur_round_qidx = []
     st.session_state.cur_idx_in_round = 0
-    st.session_state.records = []  # (round, prompt, chosen, correct, is_correct, opts_disp, opts_val)
+    st.session_state.records = []
     st.session_state.score_this_round = 0
     st.session_state.submitted = False
     st.session_state.last_feedback = ""
@@ -174,7 +174,7 @@ if "round" not in st.session_state:
     init_state()
     start_new_round()
 
-# ====== GSheet 寫入：每題立即 append ======
+# ====== 單題即時寫入 ======
 def persist_one(qidx:int, q:dict, chosen_label:str, is_correct:bool, phase:str):
     """把單題紀錄立即寫入 GSheet（失敗則落地 CSV）"""
     name = st.session_state.get("user_name","")
