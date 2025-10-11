@@ -288,7 +288,8 @@ def persist_records(phase: str):
         idx_label, prompt, chosen, correct_en, is_correct, mode, qidx = rec
         rows.append([
             _now_ts(), sid, name, klass, seat,
-            phase, str(mode).replace("\n", " "), idx_label, qidx,
+            phase, str(mode).replace("
+", " "), idx_label, qidx,
             prompt, correct_en, chosen, str(bool(is_correct))
         ])
 
@@ -311,7 +312,8 @@ def persist_last_record(phase: str):
     idx_label, prompt, chosen, correct_en, is_correct, mode, qidx = st.session_state.records[-1]
     row = [[
         _now_ts(), sid, name, klass, seat,
-        phase, str(mode).replace("\n", " "), idx_label, qidx,
+        phase, str(mode).replace("
+", " "), idx_label, qidx,
         prompt, correct_en, chosen, str(bool(is_correct))
     ]]
     ok, msg = (True, "SKIP")
@@ -333,7 +335,7 @@ def persist_last_record(phase: str):
     idx_label, prompt, chosen, correct_en, is_correct, mode, qidx = st.session_state.records[-1]
     row = [[
         _now_ts(), sid, name, klass, seat,
-        phase, mode.replace("
+        phase, str(mode).replace("
 ", " "), idx_label, qidx,
         prompt, correct_en, chosen, str(bool(is_correct))
     ]]
