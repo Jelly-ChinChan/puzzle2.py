@@ -42,7 +42,7 @@ try:
         if not sid or not saj:
             _GS_OK = False
             return
-        creds = Credentials.from_service_account_info(eval(saj), scopes=[
+        creds = Credentials.from_service_account_info(json.loads(saj), scopes=[
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive",
         ])
