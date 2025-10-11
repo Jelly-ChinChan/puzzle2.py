@@ -16,6 +16,7 @@ import datetime as dt
 from urllib.parse import urlencode
 
 import streamlit as st
+import json
 
 # ===============（可選）Google Sheet 連線設定=================
 # 若要寫入 Google 試算表：
@@ -237,6 +238,12 @@ def _now_ts():
     return dt.datetime.now().isoformat(timespec="seconds")
 
 
+def _clean_mode(mode_obj) -> str:
+    """把模式字串中的換行移除，避免寫表時出現換行與語法截斷問題。"""
+    return str(mode_obj).replace("
+", " ")
+
+
 def append_to_local_csv(rows):
     exists = os.path.exists(CSV_PATH)
     with open(CSV_PATH, "a", newline="", encoding="utf-8") as f:
@@ -289,8 +296,7 @@ def persist_records(phase: str):
         idx_label, prompt, chosen, correct_en, is_correct, mode, qidx = rec
         rows.append([
             _now_ts(), sid, name, klass, seat,
-            phase, str(mode).replace("\n", " "),
-", " "), idx_label, qidx,
+            phase, _clean_mode(mode), idx_label, qidx,
             prompt, correct_en, chosen, str(bool(is_correct))
         ])
 
@@ -315,51 +321,10 @@ def persist_last_record(phase: str):
     idx_label, prompt, chosen, correct_en, is_correct, mode, qidx = st.session_state.records[-1]
     row = [[
         _now_ts(), sid, name, klass, seat,
-        phase, str(mode).replace("\n", " "),
-", " "), idx_label, qidx,
+        phase, _clean_mode(mode), idx_label, qidx,
         prompt, correct_en, chosen, str(bool(is_correct))
     ]]
 
-    ok, msg = (True, "SKIP")
-    if _GS_OK:
-        ok, msg = append_to_gsheet(row)
-    if not ok:
-        append_to_local_csv(row)
-    return ok, msg
-
-    klass = st.session_state.get("user_class", "")
-    seat = st.session_state.get("user_seat", "")
-    sid = st.session_state.get("session_id", "")
-    idx_label, prompt, chosen, correct_en, is_correct, mode, qidx = st.session_state.records[-1]
-    row = [[
-        _now_ts(), sid, name, klass, seat,
-        phase, str(mode).replace("\n", " "),
-", " "), idx_label, qidx,
-        prompt, correct_en, chosen, str(bool(is_correct))
-    ]]
-    ok, msg = (True, "SKIP")
-    if _GS_OK:
-        ok, msg = append_to_gsheet(row)
-    if not ok:
-        append_to_local_csv(row)
-    return ok, msg
-
-
-def persist_last_record(phase: str):
-    """只把最後一筆 st.session_state.records[-1] 立即寫出（每題提交時用）。"""
-    if not st.session_state.records:
-        return False, "no-record"
-    name = st.session_state.get("user_name", "")
-    klass = st.session_state.get("user_class", "")
-    seat = st.session_state.get("user_seat", "")
-    sid = st.session_state.get("session_id", "")
-    idx_label, prompt, chosen, correct_en, is_correct, mode, qidx = st.session_state.records[-1]
-    row = [[
-        _now_ts(), sid, name, klass, seat,
-        phase, str(mode).replace("\n", " "),
-", " "), idx_label, qidx,
-        prompt, correct_en, chosen, str(bool(is_correct))
-    ]]
     ok, msg = (True, "SKIP")
     if _GS_OK:
         ok, msg = append_to_gsheet(row)
@@ -546,18 +511,33 @@ def normal_mode_page():
                 ans = (uinput[1] or "").strip()
                 is_correct = is_free_text_correct(ans, correct_en)
                 record(label_no, q, ans, is_correct, show_qidx)
-            # 立即寫出單題紀錄
-            persist_last_record("Normal")
-        else:
-            chosen_disp, _ = uinput[1]
+                persist_last_record("Normal")
+            else:
+                chosen_disp, _ = uinput[1]
                 if chosen_disp is None:
                     st.warning("請先選擇一個選項。"); st.stop()
                 is_correct = (_norm(chosen_disp) == _norm(correct_zh)) if mode == MODE_2 else (_norm(chosen_disp) == _norm(correct_en))
                 record(label_no, q, chosen_disp, is_correct, show_qidx)
-            # 立即寫出單題紀錄
-            persist_last_record("Normal")
+                persist_last_record("Normal")
 
             st.session_state.submitted = True
+            st.experimental_rerun()
+    else:
+        payload = uinput[1][1] if (uinput[0] == "MC") else None
+        last_correct = st.session_state.records[-1][4]
+        explain_block(q, st.session_state.mode, last_correct, payload)
+
+        if st.button("下一題", key="next_normal", use_container_width=True):
+            st.session_state.submitted = False
+            st.session_state.text_input_cache = ""
+            st.session_state.cur_ptr += 1
+            if st.session_state.cur_ptr >= len(st.session_state.cur_round_qidx):
+                st.session_state.round_active = False
+                st.session_state.summary_records = st.session_state.records[:]
+                # 回合結束，寫出作答紀錄（phase = Normal）
+                ok, msg = persist_records("Normal")
+                if _GS_OK and not ok:
+                    st.warning(f"寫入 Google Sheet 失敗，已改存本機 CSV：{msg}")
             st.experimental_rerun()
     else:
         payload = uinput[1][1] if (uinput[0] == "MC") else None
