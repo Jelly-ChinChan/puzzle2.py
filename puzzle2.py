@@ -289,7 +289,8 @@ def persist_records(phase: str):
         idx_label, prompt, chosen, correct_en, is_correct, mode, qidx = rec
         rows.append([
             _now_ts(), sid, name, klass, seat,
-            phase, str(mode).replace("\n", " "), idx_label, qidx,
+            phase, str(mode).replace("\n", " "),
+", " "), idx_label, qidx,
             prompt, correct_en, chosen, str(bool(is_correct))
         ])
 
@@ -314,7 +315,8 @@ def persist_last_record(phase: str):
     idx_label, prompt, chosen, correct_en, is_correct, mode, qidx = st.session_state.records[-1]
     row = [[
         _now_ts(), sid, name, klass, seat,
-        phase, str(mode).replace("\n", " "), idx_label, qidx,
+        phase, str(mode).replace("\n", " "),
+", " "), idx_label, qidx,
         prompt, correct_en, chosen, str(bool(is_correct))
     ]]
 
@@ -331,7 +333,7 @@ def persist_last_record(phase: str):
     idx_label, prompt, chosen, correct_en, is_correct, mode, qidx = st.session_state.records[-1]
     row = [[
         _now_ts(), sid, name, klass, seat,
-        phase, str(mode).replace("
+        phase, str(mode).replace("\n", " "),
 ", " "), idx_label, qidx,
         prompt, correct_en, chosen, str(bool(is_correct))
     ]]
@@ -354,7 +356,7 @@ def persist_last_record(phase: str):
     idx_label, prompt, chosen, correct_en, is_correct, mode, qidx = st.session_state.records[-1]
     row = [[
         _now_ts(), sid, name, klass, seat,
-        phase, str(mode).replace("
+        phase, str(mode).replace("\n", " "),
 ", " "), idx_label, qidx,
         prompt, correct_en, chosen, str(bool(is_correct))
     ]]
@@ -395,6 +397,30 @@ with st.sidebar:
                 st.warning("尚未正確設定 Google Sheet（或未授權）。請檢查 Secrets 與試算表分享權限。")
             else:
                 st.error(f"寫入失敗：{msg}")
+
+    with st.expander("🔍 連線狀態 / 偵錯"):
+        try:
+            conf = st.secrets.get("gsheets", {}) if hasattr(st, "secrets") else {}
+            sid = conf.get("spreadsheet_id", "(未設)")
+            import json as _json
+            saj = conf.get("service_account_json")
+            client_email = "(未知)"
+            if saj:
+                try:
+                    client_email = _json.loads(saj).get("client_email", client_email)
+                except Exception:
+                    client_email = "(secrets JSON 無法解析)"
+            st.write({"GS_configured": bool(conf), "_GS_OK_runtime": _GS_OK, "spreadsheet_id": sid, "service_account": client_email})
+            if _GS_OK:
+                try:
+                    _ = _gs_worksheet.spreadsheet.title
+                    st.success("Google Sheet 連線正常 ✅")
+                except Exception as e:
+                    st.error(f"Worksheet 連線異常：{e}")
+            else:
+                st.info("_GS_OK 為 False：尚未正確初始化 Google Sheet（請檢查 Secrets 或權限）。")
+        except Exception as e:
+            st.error(f"偵錯面板錯誤：{e}")
 
     if st.button("🔄 重新開始"):
         init_state(); start_round(); st.experimental_rerun()
