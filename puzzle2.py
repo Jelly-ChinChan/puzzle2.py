@@ -261,6 +261,21 @@ def append_to_gsheet(rows):
         return False, str(e)
 
 
+def test_ping_gsheet():
+    """寫入一行 PING 以測試 Google Sheet 連線。"""
+    sid = st.session_state.get("session_id", str(uuid.uuid4()))
+    row = [[
+        _now_ts(), sid, "PING", "-", "-",
+        "Test", "-", "-", "-",
+        "(Connectivity test)", "-", "-", "True"
+    ]]
+    if _GS_OK:
+        ok, msg = append_to_gsheet(row)
+        return ok, msg
+    else:
+        return False, "GS not configured"
+
+
 def persist_records(phase: str):
     # 將 st.session_state.records 寫出成 rows
     name = st.session_state.get("user_name", "")
@@ -273,7 +288,8 @@ def persist_records(phase: str):
         idx_label, prompt, chosen, correct_en, is_correct, mode, qidx = rec
         rows.append([
             _now_ts(), sid, name, klass, seat,
-            phase, mode.replace("\n", " "), idx_label, qidx,
+            phase, mode.replace("
+", " "), idx_label, qidx,
             prompt, correct_en, chosen, str(bool(is_correct))
         ])
 
@@ -283,6 +299,29 @@ def persist_records(phase: str):
         ok, msg = append_to_gsheet(rows)
     if not ok:
         append_to_local_csv(rows)
+    return ok, msg
+
+
+def persist_last_record(phase: str):
+    """只把最後一筆 st.session_state.records[-1] 立即寫出（每題提交時用）。"""
+    if not st.session_state.records:
+        return False, "no-record"
+    name = st.session_state.get("user_name", "")
+    klass = st.session_state.get("user_class", "")
+    seat = st.session_state.get("user_seat", "")
+    sid = st.session_state.get("session_id", "")
+    idx_label, prompt, chosen, correct_en, is_correct, mode, qidx = st.session_state.records[-1]
+    row = [[
+        _now_ts(), sid, name, klass, seat,
+        phase, mode.replace("
+", " "), idx_label, qidx,
+        prompt, correct_en, chosen, str(bool(is_correct))
+    ]]
+    ok, msg = (True, "SKIP")
+    if _GS_OK:
+        ok, msg = append_to_gsheet(row)
+    if not ok:
+        append_to_local_csv(row)
     return ok, msg
 
 # ===================== 側欄 =====================
@@ -303,9 +342,18 @@ with st.sidebar:
     )
     st.session_state.mode = st.radio("選擇練習模式", [MODE_1, MODE_2, MODE_3], index=0, disabled=not can_change_mode)
 
-    # 儀表板連結
+    # 儀表板連結 + 測試寫入
     base_url = "?" + urlencode({"view": "dashboard"})
     st.markdown(f"[📈 查看作答情況（儀表板）]({base_url})")
+    if st.button("🧪 測試寫入（Google Sheet）"):
+        ok, msg = test_ping_gsheet()
+        if ok:
+            st.success("已測試寫入：請到 responses 工作表查看最新一列 `PING` 記錄。")
+        else:
+            if msg == "GS not configured":
+                st.warning("尚未正確設定 Google Sheet（或未授權）。請檢查 Secrets 與試算表分享權限。")
+            else:
+                st.error(f"寫入失敗：{msg}")
 
     if st.button("🔄 重新開始"):
         init_state(); start_round(); st.experimental_rerun()
@@ -431,12 +479,16 @@ def normal_mode_page():
                 ans = (uinput[1] or "").strip()
                 is_correct = is_free_text_correct(ans, correct_en)
                 record(label_no, q, ans, is_correct, show_qidx)
-            else:
-                chosen_disp, _ = uinput[1]
+            # 立即寫出單題紀錄
+            persist_last_record("Normal")
+        else:
+            chosen_disp, _ = uinput[1]
                 if chosen_disp is None:
                     st.warning("請先選擇一個選項。"); st.stop()
                 is_correct = (_norm(chosen_disp) == _norm(correct_zh)) if mode == MODE_2 else (_norm(chosen_disp) == _norm(correct_en))
                 record(label_no, q, chosen_disp, is_correct, show_qidx)
+            # 立即寫出單題紀錄
+            persist_last_record("Normal")
 
             st.session_state.submitted = True
             st.experimental_rerun()
@@ -567,6 +619,8 @@ def power_mode_page():
                 is_correct = (_norm(chosen_disp) == _norm(correct_zh)) if mode == MODE_2 else (_norm(chosen_disp) == _norm(correct_en))
 
             st.session_state.submitted = True
+            # 每題提交就寫出（力量模式）
+            persist_last_record("Power")
             if not is_correct:
                 st.session_state.power_failed = True
             st.experimental_rerun()
@@ -641,6 +695,8 @@ def ultimate_mode_page():
                 is_correct = (_norm(chosen_disp) == _norm(correct_zh)) if mode == MODE_2 else (_norm(chosen_disp) == _norm(correct_en))
 
             st.session_state.submitted = True
+            # 每題提交就寫出（終極力量回合）
+            persist_last_record("Ultimate")
             if not is_correct:
                 st.session_state.ultimate_failed = True
             st.experimental_rerun()
