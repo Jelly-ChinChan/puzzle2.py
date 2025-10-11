@@ -282,21 +282,21 @@ def persist_records(phase: str):
     klass = st.session_state.get("user_class", "")
     seat = st.session_state.get("user_seat", "")
     sid = st.session_state.get("session_id", "")
+
     rows = []
     for rec in st.session_state.records:
         # rec = (idx_label, prompt, chosen_label, correct_en, is_correct, mode, qidx_cache)
         idx_label, prompt, chosen, correct_en, is_correct, mode, qidx = rec
         rows.append([
             _now_ts(), sid, name, klass, seat,
-            phase, str(mode).replace("
-", " "), idx_label, qidx,
+            phase, str(mode).replace("\n", " "), idx_label, qidx,
             prompt, correct_en, chosen, str(bool(is_correct))
         ])
 
     ok, msg = (True, "SKIP")
-    if _GS_OK:
+    if _GS_OK and rows:
         ok, msg = append_to_gsheet(rows)
-    if not ok:
+    if not ok and rows:
         append_to_local_csv(rows)
     return ok, msg
 
@@ -305,7 +305,26 @@ def persist_last_record(phase: str):
     """只把最後一筆 st.session_state.records[-1] 立即寫出（每題提交時用）。"""
     if not st.session_state.records:
         return False, "no-record"
+
     name = st.session_state.get("user_name", "")
+    klass = st.session_state.get("user_class", "")
+    seat = st.session_state.get("user_seat", "")
+    sid = st.session_state.get("session_id", "")
+
+    idx_label, prompt, chosen, correct_en, is_correct, mode, qidx = st.session_state.records[-1]
+    row = [[
+        _now_ts(), sid, name, klass, seat,
+        phase, str(mode).replace("\n", " "), idx_label, qidx,
+        prompt, correct_en, chosen, str(bool(is_correct))
+    ]]
+
+    ok, msg = (True, "SKIP")
+    if _GS_OK:
+        ok, msg = append_to_gsheet(row)
+    if not ok:
+        append_to_local_csv(row)
+    return ok, msg
+
     klass = st.session_state.get("user_class", "")
     seat = st.session_state.get("user_seat", "")
     sid = st.session_state.get("session_id", "")
